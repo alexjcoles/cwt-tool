@@ -1,0 +1,26 @@
+{
+  "name": "cwt-tool",
+  "version": "0.1.0",
+  "description": "Multi-Claude worktree orchestration: run 1-5 Claude Code instances in parallel with isolated dev containers",
+  "type": "module",
+  "bin": {
+    "cwt": "./bin/cwt"
+  },
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "cwt": "bun run bin/cwt"
+  },
+  "dependencies": {
+    "commander": "^12.1.0",
+    "kleur": "^4.1.5",
+    "eta": "^3.5.0"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.5.0"
+  },
+  "engines": {
+    "bun": ">=1.1.0"
+  }
+}

@@ -1,0 +1,14 @@
+node_modules/
+dist/
+*.log
+.DS_Store
+.env
+.env.local
+bun.lockb
+coverage/
+.cwt-test-state/
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
