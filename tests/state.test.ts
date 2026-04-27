@@ -8,10 +8,12 @@ function makeEntry(name: string, portBase: number): WorktreeEntry {
   return {
     name,
     branch: name,
+    repoRoot: "/tmp/repo",
     worktreePath: `/tmp/wt/${name}`,
     composeProject: `cwt-${name}`,
     portBase,
     linearId: null,
+    dataMount: null,
     createdAt: new Date().toISOString(),
   };
 }
@@ -38,24 +40,24 @@ describe("State", () => {
   });
 
   test("addWorktree persists entry to disk", async () => {
-    await state.addWorktree(makeEntry("foo", 3000));
+    await state.addWorktree(makeEntry("foo", 8000));
     const reloaded = new State(stateFile);
     const list = await reloaded.listWorktrees();
     expect(list).toHaveLength(1);
     expect(list[0]?.name).toBe("foo");
-    expect(list[0]?.portBase).toBe(3000);
+    expect(list[0]?.portBase).toBe(8000);
   });
 
   test("addWorktree refuses duplicates", async () => {
-    await state.addWorktree(makeEntry("foo", 3000));
-    await expect(state.addWorktree(makeEntry("foo", 3010))).rejects.toThrow(
+    await state.addWorktree(makeEntry("foo", 8000));
+    await expect(state.addWorktree(makeEntry("foo", 8100))).rejects.toThrow(
       /already exists/,
     );
   });
 
   test("removeWorktree removes entry", async () => {
-    await state.addWorktree(makeEntry("foo", 3000));
-    await state.addWorktree(makeEntry("bar", 3010));
+    await state.addWorktree(makeEntry("foo", 8000));
+    await state.addWorktree(makeEntry("bar", 8100));
     await state.removeWorktree("foo");
     const list = await state.listWorktrees();
     expect(list).toHaveLength(1);
@@ -70,27 +72,27 @@ describe("State", () => {
     expect(await state.findWorktree("missing")).toBeNull();
   });
 
-  test("nextPortBase starts at 3000 when empty", async () => {
-    expect(await state.nextPortBase()).toBe(3000);
+  test("nextPortBase starts at 8000 when empty", async () => {
+    expect(await state.nextPortBase()).toBe(8000);
   });
 
   test("nextPortBase returns sequential blocks", async () => {
-    await state.addWorktree(makeEntry("a", 3000));
-    expect(await state.nextPortBase()).toBe(3010);
-    await state.addWorktree(makeEntry("b", 3010));
-    expect(await state.nextPortBase()).toBe(3020);
+    await state.addWorktree(makeEntry("a", 8000));
+    expect(await state.nextPortBase()).toBe(8100);
+    await state.addWorktree(makeEntry("b", 8100));
+    expect(await state.nextPortBase()).toBe(8200);
   });
 
   test("nextPortBase reuses gaps", async () => {
-    await state.addWorktree(makeEntry("a", 3000));
-    await state.addWorktree(makeEntry("b", 3010));
-    await state.addWorktree(makeEntry("c", 3020));
+    await state.addWorktree(makeEntry("a", 8000));
+    await state.addWorktree(makeEntry("b", 8100));
+    await state.addWorktree(makeEntry("c", 8200));
     await state.removeWorktree("b");
-    expect(await state.nextPortBase()).toBe(3010);
+    expect(await state.nextPortBase()).toBe(8100);
   });
 
   test("save writes valid JSON", async () => {
-    await state.addWorktree(makeEntry("foo", 3000));
+    await state.addWorktree(makeEntry("foo", 8000));
     const raw = await Bun.file(stateFile).text();
     const parsed = JSON.parse(raw);
     expect(parsed.worktrees).toHaveLength(1);

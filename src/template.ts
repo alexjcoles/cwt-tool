@@ -11,6 +11,7 @@ const eta = new Eta({
   views: TEMPLATE_ROOT,
   cache: false,
   autoEscape: false,
+  autoTrim: false,
 });
 
 export async function renderTemplate(

@@ -1,12 +1,11 @@
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { mkdir } from "node:fs/promises";
 import kleur from "kleur";
 
 export const HOME = homedir();
 export const CWT_HOME = join(HOME, ".cwt");
 export const CWT_STATE_FILE = join(CWT_HOME, "state.json");
-export const WORKTREE_ROOT = join(HOME, "work", "patentsafe", "wt");
 
 export const NAME_PATTERN = /^[a-z0-9][a-z0-9-]*$/;
 export const LINEAR_ID_PATTERN = /^([a-z]+)-(\d+)(?:-(.+))?$/;
@@ -19,12 +18,20 @@ export function validateName(name: string): void {
   }
 }
 
-export function worktreePath(name: string): string {
-  return join(WORKTREE_ROOT, name);
+export function worktreeRootForRepo(repoRoot: string): string {
+  return `${repoRoot}-wt`;
+}
+
+export function worktreePath(repoRoot: string, name: string): string {
+  return join(worktreeRootForRepo(repoRoot), name);
 }
 
 export function composeProject(name: string): string {
   return `cwt-${name}`;
+}
+
+export function repoSlug(repoRoot: string): string {
+  return basename(repoRoot);
 }
 
 export async function ensureDir(path: string): Promise<void> {

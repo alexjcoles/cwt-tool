@@ -6,10 +6,12 @@ import { CWT_HOME, CWT_STATE_FILE, ensureDir } from "./util.ts";
 export interface WorktreeEntry {
   name: string;
   branch: string;
+  repoRoot: string;
   worktreePath: string;
   composeProject: string;
   portBase: number;
   linearId: string | null;
+  dataMount: string | null;
   createdAt: string;
 }
 
@@ -19,9 +21,9 @@ export interface StateData {
 }
 
 const EMPTY_STATE: StateData = { version: 1, worktrees: [] };
-const PORT_BLOCK_SIZE = 10;
-const PORT_BASE_START = 3000;
-const PORT_BASE_MAX = 4000;
+const PORT_BLOCK_SIZE = 100;
+const PORT_BASE_START = 8000;
+const PORT_BASE_MAX = 9900;
 
 export class State {
   constructor(private readonly filePath: string = CWT_STATE_FILE) {}

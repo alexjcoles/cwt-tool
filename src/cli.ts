@@ -32,23 +32,40 @@ export function buildProgram(): Command {
     .argument("<name>", "worktree name (e.g. amphtt-864-foo)")
     .option("-b, --branch <branch>", "branch name (defaults to worktree name)")
     .option("--base <branch>", "base branch to fork from (defaults to main/master)")
-    .action(async (name: string, opts: { branch?: string; base?: string }) => {
-      try {
-        const entry = await worktree.create({
-          name,
-          branch: opts.branch,
-          baseBranch: opts.base,
-        });
-        log.success(`Worktree "${entry.name}" ready`);
-        log.dim(`  branch:   ${entry.branch}`);
-        log.dim(`  path:     ${entry.worktreePath}`);
-        log.dim(`  ports:    ${entry.portBase}-${entry.portBase + 9}`);
-        log.dim(`  attach:   cwt attach ${entry.name}`);
-      } catch (e) {
-        log.error((e as Error).message);
-        process.exit(1);
-      }
-    });
+    .option("-r, --repo-root <path>", "path to source git repo (defaults to cwd)")
+    .option("-s, --service <name>", "compose service name for the app container (default: app)")
+    .option("-d, --data <path>", "host path to mount as <workspace>/storage (e.g. populated repository data)")
+    .action(
+      async (
+        name: string,
+        opts: {
+          branch?: string;
+          base?: string;
+          repoRoot?: string;
+          service?: string;
+          data?: string;
+        },
+      ) => {
+        try {
+          const entry = await worktree.create({
+            name,
+            branch: opts.branch,
+            baseBranch: opts.base,
+            repoRoot: opts.repoRoot,
+            serviceName: opts.service,
+            dataMount: opts.data,
+          });
+          log.success(`Worktree "${entry.name}" ready`);
+          log.dim(`  branch:   ${entry.branch}`);
+          log.dim(`  path:     ${entry.worktreePath}`);
+          log.dim(`  ports:    ${entry.portBase}-${entry.portBase + 99}`);
+          log.dim(`  attach:   cwt attach ${entry.name}`);
+        } catch (e) {
+          log.error((e as Error).message);
+          process.exit(1);
+        }
+      },
+    );
 
   program
     .command("list")
@@ -66,7 +83,7 @@ export function buildProgram(): Command {
           e.name,
           e.branch,
           e.running ? kleur.green("running") : kleur.dim("stopped"),
-          `${e.portBase}-${e.portBase + 9}`,
+          `${e.portBase}-${e.portBase + 99}`,
           e.linearId ?? "-",
           formatRelative(e.createdAt),
         ]);
