@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { State, type WorktreeEntry } from "./state.ts";
 import { templatePath, writeTemplate } from "./template.ts";
 import * as compose from "./compose.ts";
+import * as devcontainer from "./devcontainer.ts";
 import {
   LINEAR_ID_PATTERN,
   composeProject,
@@ -23,6 +24,7 @@ export interface CreateOptions {
   repoRoot?: string;
   serviceName?: string;
   dataMount?: string;
+  noFeatures?: boolean;
 }
 
 function detectLinearId(name: string): string | null {
@@ -172,6 +174,7 @@ export async function create(opts: CreateOptions): Promise<WorktreeEntry> {
       worktreeName: opts.name,
       portBase,
       worktreePath: wtPath,
+      repoRoot,
       composeProject: project,
       dbName,
       dockerfile: dockerfileRel,
@@ -181,8 +184,27 @@ export async function create(opts: CreateOptions): Promise<WorktreeEntry> {
   );
   log.info(`Wrote compose file to ${composeFile}`);
 
-  log.info("Starting containers (first build can take 5-10 min)...");
-  await compose.up({ projectName: project, composeFile });
+  const useDevcontainer =
+    !opts.noFeatures && devcontainer.projectHasDevcontainer(wtPath);
+
+  if (useDevcontainer) {
+    log.info(
+      "Detected project devcontainer.json — using devcontainer CLI (features + lifecycle hooks)",
+    );
+    await devcontainer.up({
+      worktreePath: wtPath,
+      cwtName: opts.name,
+      composeFileAbs: composeFile,
+      serviceName,
+      containerEnv: {
+        CWT_WORKTREE_NAME: opts.name,
+        CWT_PORT_BASE: String(portBase),
+      },
+    });
+  } else {
+    log.info("Starting containers via docker compose (no devcontainer features)");
+    await compose.up({ projectName: project, composeFile });
+  }
   log.success(`Containers up for ${opts.name}`);
 
   const entry: WorktreeEntry = {

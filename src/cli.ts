@@ -35,6 +35,7 @@ export function buildProgram(): Command {
     .option("-r, --repo-root <path>", "path to source git repo (defaults to cwd)")
     .option("-s, --service <name>", "compose service name for the app container (default: app)")
     .option("-d, --data <path>", "host path to mount as <workspace>/storage (e.g. populated repository data)")
+    .option("--no-features", "skip devcontainer features/lifecycle even if .devcontainer/devcontainer.json exists")
     .action(
       async (
         name: string,
@@ -44,6 +45,7 @@ export function buildProgram(): Command {
           repoRoot?: string;
           service?: string;
           data?: string;
+          features?: boolean;
         },
       ) => {
         try {
@@ -54,6 +56,7 @@ export function buildProgram(): Command {
             repoRoot: opts.repoRoot,
             serviceName: opts.service,
             dataMount: opts.data,
+            noFeatures: opts.features === false,
           });
           log.success(`Worktree "${entry.name}" ready`);
           log.dim(`  branch:   ${entry.branch}`);

@@ -15,6 +15,10 @@ services:
     working_dir: /workspaces/<%= it.worktreeName %>
     volumes:
       - <%= it.worktreePath %>:/workspaces/<%= it.worktreeName %>:cached
+      # Mount source repo's .git at the same absolute path inside the container
+      # so the worktree's .git pointer (which holds a host absolute path) resolves
+      # in both places. Lets `git status/commit/log` work from inside the container.
+      - <%= it.repoRoot %>/.git:<%= it.repoRoot %>/.git:cached
       - cwt-bundle-cache:/usr/local/bundle
       - cwt-cargo-registry:/root/.cargo/registry
       - cwt-status-<%= it.worktreeName %>:/var/cwt
