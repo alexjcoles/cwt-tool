@@ -9,6 +9,7 @@ export interface WorktreeEntry {
   repoRoot: string;
   worktreePath: string;
   composeProject: string;
+  serviceName: string;
   portBase: number;
   linearId: string | null;
   dataMount: string | null;

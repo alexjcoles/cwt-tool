@@ -11,6 +11,7 @@ function makeEntry(name: string, portBase: number): WorktreeEntry {
     repoRoot: "/tmp/repo",
     worktreePath: `/tmp/wt/${name}`,
     composeProject: `cwt-${name}`,
+    serviceName: "app",
     portBase,
     linearId: null,
     dataMount: null,

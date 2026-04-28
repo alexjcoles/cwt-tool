@@ -308,6 +308,7 @@ export async function create(opts: CreateOptions): Promise<WorktreeEntry> {
     repoRoot,
     worktreePath: wtPath,
     composeProject: project,
+    serviceName,
     portBase,
     linearId,
     dataMount,
@@ -363,11 +364,13 @@ export async function attach(name: string): Promise<void> {
     throw new Error(`Worktree "${name}" not found`);
   }
   const composeFile = composeFilePath(entry.worktreePath);
+  // Older state entries (pre-serviceName field) default to "app".
+  const service = entry.serviceName ?? "app";
   log.info(`Attaching to ${name} (Ctrl-b d to detach tmux)`);
   compose.execInteractive({
     projectName: entry.composeProject,
     composeFile,
-    service: "app",
+    service,
     command: ["tmux", "new-session", "-A", "-s", "cwt"],
   });
 }
