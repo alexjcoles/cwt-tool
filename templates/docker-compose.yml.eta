@@ -21,6 +21,12 @@ services:
       - <%= it.repoRoot %>/.git:<%= it.repoRoot %>/.git:cached
       - cwt-bundle-cache:/usr/local/bundle
       - cwt-cargo-registry:/root/.cargo/registry
+      # Persist claude.ai login + sessions across cwt worktrees so /login is a
+      # one-time thing. Volume ownership is fixed up by a postStartCommand
+      # injected in the merged devcontainer config (Docker creates new named
+      # volumes root-owned, but the container runs as vscode).
+      - cwt-claude-config:/home/vscode/.claude
+      - cwt-gh-config:/home/vscode/.config/gh
       # cwt channel: MCP server bundle + activity hook, mounted read-only.
       - <%= it.channelDist %>:/cwt/channel:ro
       # Worktree status dir: shared between container and host so cwt status,
@@ -95,3 +101,7 @@ volumes:
     name: cwt-bundle-cache
   cwt-cargo-registry:
     name: cwt-cargo-registry
+  cwt-claude-config:
+    name: cwt-claude-config
+  cwt-gh-config:
+    name: cwt-gh-config

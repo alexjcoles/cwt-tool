@@ -42,6 +42,34 @@ interface ProjectDevcontainer {
   overrideCommand?: boolean;
 }
 
+// Combine a project-supplied postStartCommand with cwt's own chown step.
+// devcontainer.json supports three forms: undefined, a string, an array, or
+// an object mapping a name to a command/array. Object form lets multiple
+// commands run in parallel, which is what we want.
+function mergePostStart(
+  existing: unknown,
+  cwtCmd: string,
+): unknown {
+  if (existing === undefined || existing === null) {
+    return { "cwt-fix-volume-ownership": cwtCmd };
+  }
+  if (typeof existing === "string" || Array.isArray(existing)) {
+    return {
+      project: existing,
+      "cwt-fix-volume-ownership": cwtCmd,
+    };
+  }
+  if (typeof existing === "object") {
+    return {
+      ...(existing as Record<string, unknown>),
+      "cwt-fix-volume-ownership": cwtCmd,
+    };
+  }
+  // Unknown shape — fall back to cwt-only and log nothing (devcontainer CLI
+  // will surface schema issues if any).
+  return { "cwt-fix-volume-ownership": cwtCmd };
+}
+
 async function readProjectDevcontainer(
   repoRoot: string,
 ): Promise<ProjectDevcontainer | null> {
@@ -87,6 +115,14 @@ export async function up(opts: UpOpts): Promise<string> {
     "ghcr.io/devcontainers/features/node:1": { version: "lts" },
   };
 
+  // Docker creates new named volumes root-owned. Our shared cwt-claude-config
+  // and cwt-gh-config volumes are mounted into vscode's home, so chown them
+  // every container start (idempotent). Combined with any project-supplied
+  // postStartCommand under the named-key form so both run.
+  const cwtChown =
+    "sudo chown -R vscode:vscode /home/vscode/.claude /home/vscode/.config/gh 2>/dev/null || true";
+  const mergedPostStart = mergePostStart(project.postStartCommand, cwtChown);
+
   const merged: Record<string, unknown> = {
     name: `cwt-${opts.cwtName}`,
     dockerComposeFile: [composeFileRel],
@@ -105,7 +141,7 @@ export async function up(opts: UpOpts): Promise<string> {
     onCreateCommand: project.onCreateCommand,
     updateContentCommand: project.updateContentCommand,
     postCreateCommand: project.postCreateCommand,
-    postStartCommand: project.postStartCommand,
+    postStartCommand: mergedPostStart,
     postAttachCommand: project.postAttachCommand,
     waitFor: project.waitFor,
     forwardPorts: project.forwardPorts,
