@@ -115,13 +115,15 @@ export async function up(opts: UpOpts): Promise<string> {
     "ghcr.io/devcontainers/features/node:1": { version: "lts" },
   };
 
-  // Docker creates new named volumes root-owned. Our shared cwt-claude-config
-  // and cwt-gh-config volumes are mounted into vscode's home, so chown them
-  // every container start (idempotent). Combined with any project-supplied
-  // postStartCommand under the named-key form so both run.
-  const cwtChown =
-    "sudo chown -R vscode:vscode /home/vscode/.claude /home/vscode/.config/gh 2>/dev/null || true";
-  const mergedPostStart = mergePostStart(project.postStartCommand, cwtChown);
+  // Two cwt-side fixups that need to run on every container start:
+  //   1. Docker creates new named volumes root-owned, but the rails
+  //      devcontainer runs as vscode — chown the shared volumes.
+  //   2. tmux isn't in the rails devcontainer base image. cwt attach uses
+  //      tmux so we install it on demand. Idempotent (`|| true`).
+  const cwtFixup =
+    "sudo chown -R vscode:vscode /home/vscode/.claude /home/vscode/.config/gh 2>/dev/null || true; " +
+    "command -v tmux >/dev/null 2>&1 || sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends tmux >/dev/null 2>&1 || true";
+  const mergedPostStart = mergePostStart(project.postStartCommand, cwtFixup);
 
   const merged: Record<string, unknown> = {
     name: `cwt-${opts.cwtName}`,
