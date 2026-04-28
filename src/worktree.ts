@@ -22,6 +22,31 @@ import {
 const here = dirname(fileURLToPath(import.meta.url));
 const CWT_PROJECT_ROOT = resolve(here, "..");
 const CHANNEL_DIST = join(CWT_PROJECT_ROOT, "channel", "dist");
+const SKILLS_SRC = join(CWT_PROJECT_ROOT, "skills");
+
+function autoDetectJavaRef(repoRoot: string): string | null {
+  // Convention: Java reference repo is a sibling named "patentsafe" next to
+  // the source repo (matches the existing devcontainer's `../../patentsafe`).
+  const sibling = resolve(repoRoot, "..", "patentsafe");
+  return existsSync(sibling) ? sibling : null;
+}
+
+async function copySkillsInto(targetDir: string): Promise<void> {
+  if (!existsSync(SKILLS_SRC)) {
+    log.warn(`Skills directory missing at ${SKILLS_SRC} — skipping skill copy`);
+    return;
+  }
+  await ensureDir(targetDir);
+  const fs = await import("node:fs/promises");
+  const entries = await fs.readdir(SKILLS_SRC, { withFileTypes: true });
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const src = join(SKILLS_SRC, entry.name);
+    const dest = join(targetDir, entry.name);
+    await fs.cp(src, dest, { recursive: true, force: true });
+  }
+  log.info(`Copied ${entries.filter((e) => e.isDirectory()).length} cwt skills into ${targetDir}`);
+}
 
 export interface CreateOptions {
   name: string;
@@ -30,6 +55,7 @@ export interface CreateOptions {
   repoRoot?: string;
   serviceName?: string;
   dataMount?: string;
+  javaRef?: string;
   noFeatures?: boolean;
 }
 
@@ -180,6 +206,16 @@ export async function create(opts: CreateOptions): Promise<WorktreeEntry> {
     throw new Error(`--data path does not exist: ${dataMount}`);
   }
 
+  const javaRef = opts.javaRef ?? autoDetectJavaRef(repoRoot);
+  if (opts.javaRef && !existsSync(opts.javaRef)) {
+    throw new Error(`--java-ref path does not exist: ${opts.javaRef}`);
+  }
+  if (javaRef) {
+    log.info(`Java reference repo: ${javaRef} → /workspaces/patentsafe`);
+  } else {
+    log.dim("No Java reference repo found (looked for sibling 'patentsafe' dir). Java exploration skill will fail until one is mounted.");
+  }
+
   await writeTemplate(
     "docker-compose.yml.eta",
     composeFile,
@@ -193,6 +229,7 @@ export async function create(opts: CreateOptions): Promise<WorktreeEntry> {
       dockerfile: dockerfileRel,
       serviceName,
       dataMount,
+      javaRef,
       channelDist: CHANNEL_DIST,
       statusDir,
     },
@@ -210,6 +247,13 @@ export async function create(opts: CreateOptions): Promise<WorktreeEntry> {
     join(wtPath, ".claude", "settings.json"),
     { worktreeName: opts.name },
   );
+
+  // Copy cwt's bundled skills into the worktree's .claude/skills/. These are
+  // gitignored at the source, so git worktree add doesn't carry over the
+  // project's own skills, and our cwt-* skills won't conflict with project ones
+  // because the names are prefixed.
+  await copySkillsInto(join(wtPath, ".claude", "skills"));
+
   log.info(`Wrote compose file to ${composeFile}`);
 
   const useDevcontainer =

@@ -29,6 +29,11 @@ services:
 <% if (it.dataMount) { %>
       - <%= it.dataMount %>:/workspaces/<%= it.worktreeName %>/storage:cached
 <% } %>
+<% if (it.javaRef) { %>
+      # Original Java PatentSafe codebase, read-only — used by cwt-java-explore
+      # and the Java flow tracer subagent for plan-minor.
+      - <%= it.javaRef %>:/workspaces/patentsafe:cached,ro
+<% } %>
     environment:
       CWT_WORKTREE_NAME: <%= it.worktreeName %>
       CWT_PORT_BASE: "<%= it.portBase %>"
