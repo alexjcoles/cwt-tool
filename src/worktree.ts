@@ -23,6 +23,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const CWT_PROJECT_ROOT = resolve(here, "..");
 const CHANNEL_DIST = join(CWT_PROJECT_ROOT, "channel", "dist");
 const SKILLS_SRC = join(CWT_PROJECT_ROOT, "skills");
+const HOOKS_SRC = join(CWT_PROJECT_ROOT, "hooks");
 
 function autoDetectJavaRef(repoRoot: string): string | null {
   // Convention: Java reference repo is a sibling named "patentsafe" next to
@@ -46,6 +47,27 @@ async function copySkillsInto(targetDir: string): Promise<void> {
     await fs.cp(src, dest, { recursive: true, force: true });
   }
   log.info(`Copied ${entries.filter((e) => e.isDirectory()).length} cwt skills into ${targetDir}`);
+}
+
+async function copyHooksInto(targetDir: string): Promise<void> {
+  if (!existsSync(HOOKS_SRC)) {
+    log.warn(`Hooks directory missing at ${HOOKS_SRC} — skipping hook copy`);
+    return;
+  }
+  await ensureDir(targetDir);
+  const fs = await import("node:fs/promises");
+  const entries = await fs.readdir(HOOKS_SRC, { withFileTypes: true });
+  let count = 0;
+  for (const entry of entries) {
+    if (!entry.isFile()) continue;
+    const src = join(HOOKS_SRC, entry.name);
+    const dest = join(targetDir, entry.name);
+    await fs.cp(src, dest, { force: true });
+    // cp preserves mode but be explicit — hooks must be executable
+    await fs.chmod(dest, 0o755);
+    count++;
+  }
+  log.info(`Copied ${count} cwt hooks into ${targetDir}`);
 }
 
 export interface CreateOptions {
@@ -253,6 +275,7 @@ export async function create(opts: CreateOptions): Promise<WorktreeEntry> {
   // project's own skills, and our cwt-* skills won't conflict with project ones
   // because the names are prefixed.
   await copySkillsInto(join(wtPath, ".claude", "skills"));
+  await copyHooksInto(join(wtPath, ".claude", "hooks"));
 
   log.info(`Wrote compose file to ${composeFile}`);
 
