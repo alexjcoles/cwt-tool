@@ -79,12 +79,20 @@ export async function up(opts: UpOpts): Promise<string> {
   const configPath = join(cwtConfigDir, "devcontainer.json");
   const composeFileRel = relative(cwtConfigDir, opts.composeFileAbs);
 
+  // cwt's channel server runs under Node inside the container. Inject the
+  // node feature so any project devcontainer gets a working JS runtime,
+  // regardless of whether the project itself needs one.
+  const featuresWithNode = {
+    ...(project.features ?? {}),
+    "ghcr.io/devcontainers/features/node:1": { version: "lts" },
+  };
+
   const merged: Record<string, unknown> = {
     name: `cwt-${opts.cwtName}`,
     dockerComposeFile: [composeFileRel],
     service: opts.serviceName,
     workspaceFolder: `/workspaces/${opts.cwtName}`,
-    features: project.features ?? {},
+    features: featuresWithNode,
     customizations: project.customizations,
     containerEnv: {
       ...(project.containerEnv ?? {}),

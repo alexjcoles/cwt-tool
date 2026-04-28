@@ -6,6 +6,11 @@ import kleur from "kleur";
 export const HOME = homedir();
 export const CWT_HOME = join(HOME, ".cwt");
 export const CWT_STATE_FILE = join(CWT_HOME, "state.json");
+export const CWT_WORKTREES_DIR = join(CWT_HOME, "worktrees");
+
+export function statusDirForWorktree(name: string): string {
+  return join(CWT_WORKTREES_DIR, name);
+}
 
 export const NAME_PATTERN = /^[a-z0-9][a-z0-9-]*$/;
 export const LINEAR_ID_PATTERN = /^([a-z]+)-(\d+)(?:-(.+))?$/;

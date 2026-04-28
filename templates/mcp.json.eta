@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "cwt-channel": {
+      "command": "node",
+      "args": ["/cwt/channel/server.js"],
+      "env": {
+        "CWT_STATUS_DIR": "/var/cwt/<%= it.worktreeName %>",
+        "CWT_WORKTREE_NAME": "<%= it.worktreeName %>"
+      }
+    }
+  }
+}

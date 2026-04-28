@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { copyFile, rm } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { State, type WorktreeEntry } from "./state.ts";
 import { templatePath, writeTemplate } from "./template.ts";
 import * as compose from "./compose.ts";
@@ -12,10 +13,15 @@ import {
   log,
   run,
   runOrThrow,
+  statusDirForWorktree,
   validateName,
   worktreePath,
   worktreeRootForRepo,
 } from "./util.ts";
+
+const here = dirname(fileURLToPath(import.meta.url));
+const CWT_PROJECT_ROOT = resolve(here, "..");
+const CHANNEL_DIST = join(CWT_PROJECT_ROOT, "channel", "dist");
 
 export interface CreateOptions {
   name: string;
@@ -145,6 +151,13 @@ export async function create(opts: CreateOptions): Promise<WorktreeEntry> {
 
   const dbName = `patentsafe_wt_${opts.name.replace(/-/g, "_")}`;
   const composeFile = composeFilePath(wtPath);
+  const statusDir = statusDirForWorktree(opts.name);
+  await ensureDir(statusDir);
+
+  if (!existsSync(join(CHANNEL_DIST, "server.js"))) {
+    log.info("Channel server bundle missing — running build:channel");
+    await runOrThrow(["bun", "run", "build:channel"], { cwd: CWT_PROJECT_ROOT });
+  }
 
   // Choose Dockerfile: prefer project's existing devcontainer/Dockerfile
   // (mounted at build time as part of the worktree itself), else fall back
@@ -180,7 +193,22 @@ export async function create(opts: CreateOptions): Promise<WorktreeEntry> {
       dockerfile: dockerfileRel,
       serviceName,
       dataMount,
+      channelDist: CHANNEL_DIST,
+      statusDir,
     },
+  );
+
+  // Write .mcp.json and .claude/settings.json into the worktree so Claude Code
+  // (started inside the container) registers cwt-channel and the activity hook.
+  await writeTemplate(
+    "mcp.json.eta",
+    join(wtPath, ".mcp.json"),
+    { worktreeName: opts.name },
+  );
+  await writeTemplate(
+    "claude-settings.json.eta",
+    join(wtPath, ".claude", "settings.json"),
+    { worktreeName: opts.name },
   );
   log.info(`Wrote compose file to ${composeFile}`);
 
@@ -279,6 +307,65 @@ export async function attach(name: string): Promise<void> {
 
 export interface ListEntry extends WorktreeEntry {
   running: boolean;
+}
+
+export interface StatusEntry {
+  name: string;
+  status: ChannelStatus | null;
+}
+
+interface ChannelStatus {
+  state: string;
+  summary: string;
+  currentFile: string | null;
+  updatedAt: string;
+}
+
+export async function statusReport(): Promise<StatusEntry[]> {
+  const state = new State();
+  const entries = await state.listWorktrees();
+  const fs = await import("node:fs/promises");
+  const results: StatusEntry[] = [];
+  for (const entry of entries) {
+    const stateFile = join(statusDirForWorktree(entry.name), "state.json");
+    let status: ChannelStatus | null = null;
+    if (existsSync(stateFile)) {
+      try {
+        const raw = await fs.readFile(stateFile, "utf8");
+        const parsed = JSON.parse(raw) as ChannelStatus;
+        status = parsed;
+      } catch {
+        status = null;
+      }
+    }
+    results.push({ name: entry.name, status });
+  }
+  return results;
+}
+
+export async function tailActivity(
+  name: string,
+  opts: { follow: boolean; lines: number },
+): Promise<void> {
+  validateName(name);
+  const state = new State();
+  const entry = await state.findWorktree(name);
+  if (!entry) {
+    throw new Error(`Worktree "${name}" not found`);
+  }
+  const activityFile = join(statusDirForWorktree(name), "activity.jsonl");
+  if (!existsSync(activityFile)) {
+    log.dim(`(no activity logged yet at ${activityFile})`);
+    return;
+  }
+  const tailArgs = ["-n", String(opts.lines)];
+  if (opts.follow) tailArgs.push("-f");
+  tailArgs.push(activityFile);
+  Bun.spawnSync(["tail", ...tailArgs], {
+    stdin: "inherit",
+    stdout: "inherit",
+    stderr: "inherit",
+  });
 }
 
 export async function list(): Promise<ListEntry[]> {

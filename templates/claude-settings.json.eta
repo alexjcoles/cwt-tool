@@ -1,0 +1,26 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "CWT_STATUS_DIR=/var/cwt/<%= it.worktreeName %> CWT_WORKTREE_NAME=<%= it.worktreeName %> node /cwt/channel/hook.js"
+          }
+        ]
+      }
+    ]
+  },
+  "permissions": {
+    "allow": [
+      "Read",
+      "Glob",
+      "Grep",
+      "LS",
+      "TodoWrite",
+      "mcp__cwt-channel__report_status",
+      "mcp__cwt-channel__note"
+    ]
+  }
+}

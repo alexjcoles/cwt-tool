@@ -142,9 +142,62 @@ export function buildProgram(): Command {
 
   program
     .command("status")
-    .description("Show status from each worktree's channel server (M2)")
-    .action(() => {
-      log.warn("`cwt status` is part of Milestone 2 (channel server). Not yet implemented.");
+    .description("Show what each Claude is reporting via the cwt-channel server")
+    .action(async () => {
+      try {
+        const entries = await worktree.statusReport();
+        if (entries.length === 0) {
+          log.dim("No worktrees yet. Try: cwt new <name>");
+          return;
+        }
+        const headers = ["NAME", "PHASE", "SUMMARY", "FILE", "AGE"];
+        const rows = entries.map((e) => [
+          e.name,
+          e.status ? colorState(e.status.state) : kleur.dim("—"),
+          e.status?.summary ?? kleur.dim("(no report yet)"),
+          e.status?.currentFile ?? kleur.dim("—"),
+          e.status ? formatRelative(e.status.updatedAt) : kleur.dim("—"),
+        ]);
+        const widths = headers.map((h, i) =>
+          Math.max(
+            stripAnsi(h).length,
+            ...rows.map((r) => stripAnsi(r[i] ?? "").length),
+          ),
+        );
+        console.log(
+          headers
+            .map((h, i) => kleur.bold(pad(h, widths[i] ?? 0)))
+            .join("  "),
+        );
+        for (const row of rows) {
+          console.log(
+            row
+              .map((c, i) => padAnsi(c ?? "", widths[i] ?? 0))
+              .join("  "),
+          );
+        }
+      } catch (e) {
+        log.error((e as Error).message);
+        process.exit(1);
+      }
+    });
+
+  program
+    .command("logs")
+    .description("Tail a worktree's activity log")
+    .argument("<name>", "worktree name")
+    .option("-f, --follow", "follow as new entries arrive")
+    .option("-n, --lines <n>", "number of trailing lines", "20")
+    .action(async (name: string, opts: { follow?: boolean; lines?: string }) => {
+      try {
+        await worktree.tailActivity(name, {
+          follow: opts.follow ?? false,
+          lines: parseInt(opts.lines ?? "20", 10),
+        });
+      } catch (e) {
+        log.error((e as Error).message);
+        process.exit(1);
+      }
     });
 
   program
@@ -155,6 +208,23 @@ export function buildProgram(): Command {
     });
 
   return program;
+}
+
+function colorState(state: string): string {
+  switch (state) {
+    case "planning":
+      return kleur.cyan(state);
+    case "working":
+      return kleur.green(state);
+    case "blocked":
+      return kleur.red(state);
+    case "waiting":
+      return kleur.yellow(state);
+    case "done":
+      return kleur.gray(state);
+    default:
+      return state;
+  }
 }
 
 function stripAnsi(s: string): string {
