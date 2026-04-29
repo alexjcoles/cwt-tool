@@ -720,8 +720,12 @@ async function runCreateFlow(
       dataMount: defaults.dataMount ?? undefined,
     });
     process.stdout.write(
-      "\n" + kleur.green("✓ done. ") + kleur.dim(`relaunch with: cwt dashboard\n`),
+      "\n" + kleur.green("✓ done. ") + kleur.dim(`reopening dashboard...\n`),
     );
+    // Relaunch the dashboard in-process so the user lands back on the table
+    // with the new worktree visible. No exec — same Bun process keeps state
+    // (tailer offsets are reset, which is fine).
+    await runDashboard();
     process.exit(0);
   } catch (e) {
     process.stderr.write(kleur.red(`✗ ${(e as Error).message}\n`));
