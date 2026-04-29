@@ -400,6 +400,37 @@ export async function destroy(name: string): Promise<void> {
   log.success(`Removed worktree ${name}`);
 }
 
+export async function execCommand(name: string, command: string): Promise<number> {
+  validateName(name);
+  const state = new State();
+  const entry = await state.findWorktree(name);
+  if (!entry) {
+    throw new Error(`Worktree "${name}" not found`);
+  }
+  const composeFile = composeFilePath(entry.worktreePath);
+  const service = entry.serviceName ?? "app";
+  const { spawnSync } = await import("node:child_process");
+  // bash -ic so mise activates and project tools (ruby, bundler, rails, gh)
+  // are on PATH. Stdio inherited so output streams to the user's terminal.
+  const result = spawnSync(
+    "docker",
+    [
+      "compose",
+      "-p",
+      entry.composeProject,
+      "-f",
+      composeFile,
+      "exec",
+      service,
+      "bash",
+      "-ic",
+      command,
+    ],
+    { stdio: "inherit" },
+  );
+  return result.status ?? 1;
+}
+
 export async function attach(name: string): Promise<void> {
   validateName(name);
   const state = new State();

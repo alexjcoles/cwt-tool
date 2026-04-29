@@ -131,6 +131,21 @@ export function buildProgram(): Command {
     });
 
   program
+    .command("exec")
+    .description("Run a one-shot command inside a worktree's container (bash -ic)")
+    .argument("<name>", "worktree name")
+    .argument("<command...>", "the command and its args")
+    .action(async (name: string, command: string[]) => {
+      try {
+        const code = await worktree.execCommand(name, command.join(" "));
+        process.exit(code);
+      } catch (e) {
+        log.error((e as Error).message);
+        process.exit(1);
+      }
+    });
+
+  program
     .command("rm")
     .description("Remove a worktree and tear down its container")
     .argument("<name>", "worktree name")

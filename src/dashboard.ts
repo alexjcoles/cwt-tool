@@ -458,6 +458,7 @@ type Mode =
   | { kind: "message"; targetWorktree: string; buffer: string }
   | { kind: "new_worktree"; buffer: string }
   | { kind: "remove_confirm"; entry: WorktreeEntry }
+  | { kind: "bash_input"; entry: WorktreeEntry; buffer: string }
   | {
       kind: "view_plan";
       entry: WorktreeEntry;
@@ -595,13 +596,17 @@ function renderTable(opts: RenderOpts): string {
     hint = kleur.bold().cyan("MESSAGE: ") + kleur.dim("type · ENTER send · ESC cancel");
   } else if (mode.kind === "remove_confirm") {
     hint = kleur.bold().red("REMOVE: ") + kleur.dim("y confirm · n cancel");
+  } else if (mode.kind === "bash_input") {
+    hint =
+      kleur.bold().cyan("BASH: ") +
+      kleur.dim("type · ENTER run · ESC cancel");
   } else if (mode.kind === "view_plan") {
     // Plan view renders its own footer; this hint is unused but assigned
     // so we don't write the table-mode hint line on top of the plan body.
     hint = "";
   } else {
     hint = kleur.dim(
-      "↑↓ navigate · ENTER attach · n new · x kill · v plan · d decide · m msg · p perm · q quit",
+      "↑↓ nav · ENTER attach · n new · x kill · v plan · g diff · b bash · d decide · m msg · p perm · q quit",
     );
   }
   out.push(hint + CLEAR_LINE);
@@ -815,6 +820,44 @@ function renderPlanView(
   out.push(moveTo(termRows, 1));
   out.push(CLEAR_LINE);
 
+  return out.join("");
+}
+
+function renderBashInput(
+  entry: WorktreeEntry,
+  buffer: string,
+  cols: number,
+  termRows: number,
+): string {
+  const out: string[] = [];
+  const w = Math.min(cols - 4, 100);
+  const startRow = Math.max(2, Math.floor((termRows - 6) / 2));
+  const startCol = Math.max(2, Math.floor((cols - w) / 2));
+
+  const horiz = "─".repeat(w - 2);
+  const inputLine = ` $ ${buffer}_`;
+  const lines = [
+    kleur.cyan(`┌${horiz}┐`),
+    kleur.cyan("│") +
+      padAnsi(
+        ` ${kleur.bold("BASH")} in ${kleur.bold(entry.name)} ${kleur.dim("(bash -ic, mise active)")}`,
+        w - 2,
+      ) +
+      kleur.cyan("│"),
+    kleur.cyan(`├${horiz}┤`),
+    kleur.cyan("│") + padAnsi(inputLine, w - 2) + kleur.cyan("│"),
+    kleur.cyan(`├${horiz}┤`),
+    kleur.cyan("│") +
+      padAnsi(
+        ` ${kleur.bold("ENTER")} run · ${kleur.bold("ESC")} cancel`,
+        w - 2,
+      ) +
+      kleur.cyan("│"),
+    kleur.cyan(`└${horiz}┘`),
+  ];
+  for (let i = 0; i < lines.length; i++) {
+    out.push(moveTo(startRow + i, startCol) + lines[i]);
+  }
   return out.join("");
 }
 
@@ -1355,6 +1398,8 @@ export async function runDashboard(): Promise<void> {
       out += renderNewWorktreeInput(mode.buffer, defaults, branchPrefix, cols, termRows);
     } else if (mode.kind === "remove_confirm") {
       out += renderRemoveConfirm(mode.entry, cols, termRows);
+    } else if (mode.kind === "bash_input") {
+      out += renderBashInput(mode.entry, mode.buffer, cols, termRows);
     } else if (mode.kind === "view_plan") {
       // Plan view replaces the whole screen, not a modal overlay
       out =
@@ -1556,6 +1601,80 @@ export async function runDashboard(): Promise<void> {
       return;
     }
 
+    // Bash input — runs a one-shot command in the selected worktree's container
+    if (mode.kind === "bash_input") {
+      if (chunk === "\r" || chunk === "\n") {
+        const cmd = mode.buffer.trim();
+        const entry = mode.entry;
+        if (!cmd) {
+          mode = { kind: "normal" };
+          flash("Cancelled (empty command)");
+          redraw();
+          return;
+        }
+        clearInterval(tick);
+        cleanup();
+        process.stdout.write(
+          kleur.dim(`→ ${entry.name} $ `) + cmd + "\n\n",
+        );
+        const composeFile = join(entry.worktreePath, ".cwt", "docker-compose.yml");
+        const service = entry.serviceName ?? "app";
+        const { spawnSync } = require("node:child_process");
+        const result = spawnSync(
+          "docker",
+          [
+            "compose",
+            "-p",
+            entry.composeProject,
+            "-f",
+            composeFile,
+            "exec",
+            service,
+            "bash",
+            "-ic",
+            cmd,
+          ],
+          { stdio: "inherit" },
+        );
+        process.stdout.write(
+          "\n" +
+            (result.status === 0
+              ? kleur.green(`✓ exit 0`)
+              : kleur.red(`✗ exit ${result.status ?? "?"}`)) +
+            kleur.dim(`  press ENTER to return to dashboard...`),
+        );
+        // Wait for any keypress before relaunching dashboard
+        process.stdin.setRawMode?.(true);
+        process.stdin.resume();
+        process.stdin.once("data", () => {
+          process.stdin.setRawMode?.(false);
+          process.stdin.pause();
+          process.stdout.write("\n");
+          finishCleanly();
+          void runDashboard().then(() => process.exit(0));
+        });
+        return;
+      } else if (chunk === "\x1b") {
+        mode = { kind: "normal" };
+        flash("Cancelled");
+        redraw();
+      } else if (chunk === "\x7f" || chunk === "\b") {
+        mode = { ...mode, buffer: mode.buffer.slice(0, -1) };
+        redraw();
+      } else if (chunk === "\x03") {
+        clearInterval(tick);
+        finishCleanly();
+        return;
+      } else {
+        const printable = extractPaste(chunk);
+        if (printable) {
+          mode = { ...mode, buffer: mode.buffer + printable };
+          redraw();
+        }
+      }
+      return;
+    }
+
     // Remove confirm
     if (mode.kind === "remove_confirm") {
       if (chunk === "y" || chunk === "Y") {
@@ -1717,6 +1836,48 @@ export async function runDashboard(): Promise<void> {
       if (!target) return;
       mode = { kind: "remove_confirm", entry: target.entry };
       redraw();
+    } else if (chunk === "b") {
+      // bash command in selected worktree's container
+      const target = rows[selected];
+      if (!target) return;
+      mode = { kind: "bash_input", entry: target.entry, buffer: "" };
+      redraw();
+    } else if (chunk === "g") {
+      // git diff main..HEAD via less
+      const target = rows[selected];
+      if (!target) return;
+      clearInterval(tick);
+      cleanup();
+      const composeFile = join(target.entry.worktreePath, ".cwt", "docker-compose.yml");
+      const service = target.entry.serviceName ?? "app";
+      process.stdout.write(
+        kleur.dim(
+          `→ git diff main..HEAD in ${target.entry.name}\n  q in less to return to dashboard\n\n`,
+        ),
+      );
+      const { spawnSync } = require("node:child_process");
+      // less -R passes through colors. The base ref is `main` per project
+      // convention; if a worktree forks from a different base the user can
+      // still get useful info by ignoring the "main" branch part.
+      spawnSync(
+        "docker",
+        [
+          "compose",
+          "-p",
+          target.entry.composeProject,
+          "-f",
+          composeFile,
+          "exec",
+          service,
+          "bash",
+          "-ic",
+          `cd /workspaces/${target.entry.name} && git diff --color=always main..HEAD | less -R`,
+        ],
+        { stdio: "inherit" },
+      );
+      finishCleanly();
+      void runDashboard().then(() => process.exit(0));
+      return;
     } else if (chunk === "v") {
       // view plan for selected worktree
       const target = rows[selected];
