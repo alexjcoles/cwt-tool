@@ -386,10 +386,13 @@ function renderTable(opts: RenderOpts): string {
     totalPending > 0
       ? kleur.bold().yellow(` · ${totalPending} pending permission${totalPending === 1 ? "" : "s"} `)
       : "";
+  const linearNote = process.env.LINEAR_API_KEY
+    ? kleur.dim(` · Linear: ${kleur.green("on")} `)
+    : kleur.dim(` · Linear: ${kleur.red("off")} `);
   const title =
     kleur.bold().bgBlue().white(
       ` cwt dashboard — ${rows.length} worktree${rows.length === 1 ? "" : "s"} `,
-    ) + pendingNote;
+    ) + pendingNote + linearNote;
   out.push(title + CLEAR_LINE + "\n");
 
   // Table header
