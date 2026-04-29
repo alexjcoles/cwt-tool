@@ -146,37 +146,69 @@ report_status('blocked', 'Peer review still finds <N> FIX-grade items after 3 pa
 
 Output the unresolved findings and stop. The human will decide whether to push despite, or take over.
 
-## Step 8: Clean exit
+## Step 8: Auto-push and open the PR
 
-When a pass returns `[]` (or only LEAVE findings):
+When a pass returns `[]` (or only LEAVE findings), the work is ready to ship. **Do not gate this step on the user** — clean review = auto-push + auto-open PR.
+
+Run final checks:
 
 ```bash
 bin/run-tests.sh --core 2>&1 | tail -5
 bin/rubocop 2>&1 | tail -3
 ```
 
-If both clean: `report_status('waiting', 'Peer review clean; awaiting push approval')`.
+If either fails, do NOT push. `report_status('blocked', 'Final checks failed: <one-line>')` and stop. The user investigates.
 
-Then call `await_decision` so the dashboard surfaces the push gate:
+If both clean, push:
 
-```
-await_decision(
-  question="Peer review clean after <N> pass(es).\n" +
-           "Findings addressed: <count> · LEAVE annotated: <count> · " +
-           "review-pass commits: <count>\n\n" +
-           "Reply 'push' to git push the branch, or describe what to revisit.",
-  options=["push"]
-)
+```bash
+git push -u origin <branch>
 ```
 
-Branch on the answer:
+`report_status('working', 'Pushed; opening PR')`.
 
-- "push" (case-insensitive): run `git push -u origin <branch>`, then proceed to **Step 9**.
-- Revision request: address it (additional commits), re-run from Step 2 (a new review pass on the new diff).
+## Step 9: Open the PR
 
-**Do NOT push without an explicit approval.** The decision tool returns text — only `push` (case-insensitive, trimmed) is a valid push trigger.
+Use `gh pr create` with the plan as the source of truth for title and body.
 
-## Step 9: Push a `temp/<issue-id>` ref if the diff includes UI changes
+**Title**: pull from the first non-`docs(plans)` commit in `git log --oneline main..HEAD`. That's the conventional-commit "headline" of the work — the plan's `## Commit Structure` defined it.
+
+**Body**: assemble from the plan file. Required sections:
+
+```markdown
+## Summary
+
+- <bullet per deliverable from plan's ## Deliverables, condensed to one line>
+
+## Plan & Java alignment
+
+- Plan: `<PLAN_PATH>`
+- <One sentence on Java alignment: "Aligned with <Java class>" or "N/A — no Java equivalent" or "Intentional divergence: <reason>">
+
+## Test plan
+
+- [x] `bin/run-tests.sh --core` — <N> runs, 0 failures
+- [x] `bin/rubocop` — <N> files, 0 offenses
+- [x] `/cwt-agent-view` — clean after <N> pass(es) (<N> findings actioned, <N> left as annotated)
+- [ ] Manual: <one line if any manual verification is appropriate, or "not exercised" with reason>
+```
+
+Trailer: `🤖 Generated with [Claude Code](https://claude.com/claude-code)`.
+
+Run with a heredoc so newlines in the body survive:
+
+```bash
+gh pr create \
+  --title "<title>" \
+  --body "$(cat <<'EOF'
+<body>
+EOF
+)"
+```
+
+Capture the URL from gh's output. `note` it.
+
+## Step 10: Push a `temp/<issue-id>` ref if the diff includes UI changes
 
 The user occasionally needs to spin up a separate dev instance against the work-in-progress branch to manually review UI behaviour. The PR branch keeps moving (more commits land during review), so they want a frozen-at-this-moment ref. Convention: `temp/amphtt-NNN` (lowercase) pointing at the same SHA as the PR branch right after push.
 
@@ -186,9 +218,7 @@ Detect UI changes in the diff:
 git diff --name-only main..HEAD | grep -E '^(app/views/|app/components/|app/javascript/|app/assets/|config/tailwind|tailwind\.config|app/helpers/)' | head -1
 ```
 
-If that prints anything, the diff touches UI. (View files, view components, Stimulus controllers, asset pipeline, Tailwind config, view helpers.)
-
-If UI files are present:
+If that prints anything, the diff touches UI.
 
 ```bash
 ISSUE_LOWER=$(echo "AMPHTT-NNN" | tr A-Z a-z)
@@ -196,10 +226,12 @@ TEMP_BRANCH="temp/${ISSUE_LOWER}"
 git push --force origin HEAD:"${TEMP_BRANCH}"
 ```
 
-`--force` because the temp ref is intended to be overwritten on subsequent pushes — it always points at the *current* head of the PR branch, not a historical version. The user understands this.
+`--force` because the temp ref is intended to be overwritten on subsequent pushes — it always points at the *current* head of the PR branch, not a historical version.
 
-Then `report_status('done', 'Pushed; UI temp/<id> branch published; CI bots will run')` and `note` the temp branch URL so the user sees it in the dashboard.
+## Step 11: Report
 
-If the diff has no UI files, skip this step and just `report_status('done', 'Pushed; CI bots will run')`.
+`report_status('done', 'PR opened at <url>; CI bots will run')`.
 
-In either case, tell the user to run `/cwt-review-pr` once CI has commented.
+If a temp branch was pushed, `note` its URL too.
+
+Tell the user (in the chat transcript): "PR ready for review. Run `/cwt-review-pr` once CI bots have commented."

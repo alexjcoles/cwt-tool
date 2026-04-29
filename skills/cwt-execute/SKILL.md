@@ -132,24 +132,25 @@ bin/run-tests.sh --core 2>&1 | tail -5    # all tests green
 bin/rubocop 2>&1 | tail -3                # rubocop clean
 ```
 
-`report_status('waiting', 'Implementation complete; awaiting agent-view trigger')` and `note` the commit count and any new files added.
+`report_status('working', 'Implementation complete; chaining into peer review')` and `note` the commit count and any new files added.
 
-Then call `await_decision` so the dashboard surfaces the prompt:
+## Step 8: Hand off to cwt-agent-view automatically
+
+Implementation done with green tests and rubocop = ready for peer review. Don't gate on the user — chain straight into `/cwt-agent-view`. The user can still intervene any time agent-view calls `await_decision` (currently only on a 3-pass-still-not-clean stall, before that final push step).
+
+Invoke the skill via the Skill tool:
 
 ```
-await_decision(
-  question="Implementation complete.\n" +
-           "Commits: <count> · Files changed: <count> · Core tests: pass\n" +
-           "Deferrals resolved: <count> · introduced: <count>\n\n" +
-           "Reply 'go' to run /cwt-agent-view (automated peer review), " +
-           "or describe what to revisit before that.",
-  options=["go"]
-)
+Skill(skill="cwt-agent-view")
 ```
 
-Branch on the answer:
+The agent-view skill takes over from here:
+- Spawns a peer-review subagent
+- Triages findings, applies FIX items, loops up to 3 passes
+- On clean: auto-pushes the branch + opens the PR (no gate)
+- If UI files in the diff: also pushes `temp/<issue-id>` for manual UI review
+- Reports the PR URL via `note` and final `report_status('done', ...)`
 
-- "go" (case-insensitive): `report_status('done', 'Implementation complete; ready for agent-view')` and stop. The user runs `/cwt-agent-view` next.
-- Revision request: address it (additional commits, fixes), then call `await_decision` again.
+Once agent-view returns control, this skill is done. The user sees the PR URL in their dashboard's activity feed and runs `/cwt-review-pr <PR>` once CI bots have commented.
 
-**Do NOT push** in this skill. Push happens after `/cwt-agent-view` has run and the user has separately approved.
+**Do NOT push** in this skill directly. The push happens inside `/cwt-agent-view` after its review loop is clean.
