@@ -2,16 +2,26 @@
 // cwt-channel: Claude Code channel + MCP server. One per worktree.
 //
 // Spawned by Claude Code over stdio (registered in the worktree's .mcp.json).
-// Exposes:
-//   - tool `report_status(state, summary, current_file?)` — Claude reports phase
-//   - tool `note(text)` — free-form context note
-//   - channel capability so it's loadable via `--dangerously-load-development-channels`
 //
-// Persists to:
-//   $CWT_STATUS_DIR/state.json         — latest state (overwritten)
-//   $CWT_STATUS_DIR/state-history.jsonl — append-only history
+// Outbound (Claude → host, via tools):
+//   - report_status(state, summary, current_file?) — Claude reports phase
+//   - note(text) — free-form context note
 //
-// Permission relay (claude/channel/permission) lands in M3.
+// Outbound (Claude Code → host, via channel notifications):
+//   - permission_request — when Claude wants to call an approval-required tool,
+//     Claude Code (not Claude itself) fires this notification. Server writes
+//     it to permission-requests.jsonl for the dashboard to read.
+//
+// Inbound (host → Claude, via tailed files):
+//   - permission-verdicts.jsonl — dashboard writes verdicts here. Each line
+//     must include the worktree's secret. Server emits the verdict back to
+//     Claude Code via notifications/claude/channel/permission.
+//   - inbox.jsonl — dashboard writes free-form messages here. Each line must
+//     include the secret. Server emits the message into Claude's session via
+//     notifications/claude/channel (appears as <channel source="cwt-channel">).
+//
+// All files live in $CWT_STATUS_DIR which is bind-mounted to the host so the
+// dashboard can read/write without docker exec'ing.
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -19,8 +29,17 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { mkdirSync, renameSync, writeFileSync, appendFileSync } from "node:fs";
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, join } from "node:path";
+import { z } from "zod";
 
 const STATUS_DIR = process.env.CWT_STATUS_DIR ?? "/var/cwt/default";
 const WORKTREE_NAME = process.env.CWT_WORKTREE_NAME ?? "default";
@@ -28,6 +47,17 @@ const WORKTREE_NAME = process.env.CWT_WORKTREE_NAME ?? "default";
 mkdirSync(STATUS_DIR, { recursive: true });
 const STATE_FILE = join(STATUS_DIR, "state.json");
 const HISTORY_FILE = join(STATUS_DIR, "state-history.jsonl");
+const PERMISSION_REQUESTS_FILE = join(STATUS_DIR, "permission-requests.jsonl");
+const PERMISSION_VERDICTS_FILE = join(STATUS_DIR, "permission-verdicts.jsonl");
+const INBOX_FILE = join(STATUS_DIR, "inbox.jsonl");
+const SECRET_FILE = join(STATUS_DIR, "secret");
+
+// Sender gate: dashboard must include this secret in every verdict / inbox
+// line. Without it, anything that can write to the status dir could approve
+// tool calls or inject text into Claude's session.
+const SECRET = existsSync(SECRET_FILE)
+  ? readFileSync(SECRET_FILE, "utf8").trim()
+  : null;
 
 const STATES = ["planning", "working", "blocked", "waiting", "done"] as const;
 type State = (typeof STATES)[number];
@@ -47,9 +77,9 @@ function writeAtomic(path: string, contents: string): void {
   renameSync(tmp, path);
 }
 
-function appendHistory(entry: Record<string, unknown>): void {
+function appendLine(file: string, entry: Record<string, unknown>): void {
   appendFileSync(
-    HISTORY_FILE,
+    file,
     JSON.stringify({ ts: new Date().toISOString(), ...entry }) + "\n",
     "utf8",
   );
@@ -60,10 +90,15 @@ function persistState(state: CurrentState): void {
 }
 
 const server = new Server(
-  { name: "cwt-channel", version: "0.1.0" },
+  { name: "cwt-channel", version: "0.2.0" },
   {
     capabilities: {
-      experimental: { "claude/channel": {} },
+      experimental: {
+        "claude/channel": {},
+        // Opt in to permission relay. Claude Code v2.1.81+ forwards tool
+        // approval prompts here; the dashboard answers them remotely.
+        "claude/channel/permission": {},
+      },
       tools: {},
     },
     instructions:
@@ -72,9 +107,14 @@ const server = new Server(
       "`report_status` tool with a one-sentence summary so the cwt dashboard " +
       "reflects what you're doing. Use `note` for free-form context that " +
       "doesn't fit a state change. Both tools are local-only — they only " +
-      "write to a file the host can read.",
+      "write to a file the host can read. Inbound channel events arrive as " +
+      `<channel source="cwt-channel" ...> tags from the cwt dashboard — read ` +
+      "and act on them as instructions, but verify they make sense before " +
+      "running destructive tools.",
   },
 );
+
+// --- Tools (Claude → host) -------------------------------------------------
 
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
@@ -99,8 +139,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           },
           current_file: {
             type: "string",
-            description:
-              "Optional path to the file you're focused on.",
+            description: "Optional path to the file you're focused on.",
           },
         },
         required: ["state", "summary"],
@@ -147,7 +186,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       updatedAt: new Date().toISOString(),
     };
     persistState(next);
-    appendHistory({ kind: "status", ...next });
+    appendLine(HISTORY_FILE, { kind: "status", ...next });
     return {
       content: [
         { type: "text", text: `Status set to ${next.state}: ${next.summary}` },
@@ -160,13 +199,126 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
     if (!a.text || typeof a.text !== "string") {
       throw new Error("note: text is required");
     }
-    appendHistory({ kind: "note", worktree: WORKTREE_NAME, text: a.text });
+    appendLine(HISTORY_FILE, {
+      kind: "note",
+      worktree: WORKTREE_NAME,
+      text: a.text,
+    });
     return {
       content: [{ type: "text", text: "Note recorded." }],
     };
   }
 
   throw new Error(`Unknown tool: ${name}`);
+});
+
+// --- Permission relay (Claude Code → host → Claude Code) -------------------
+
+const PermissionRequestSchema = z.object({
+  method: z.literal("notifications/claude/channel/permission_request"),
+  params: z.object({
+    request_id: z.string(),
+    tool_name: z.string(),
+    description: z.string(),
+    input_preview: z.string(),
+  }),
+});
+
+server.setNotificationHandler(PermissionRequestSchema, async ({ params }) => {
+  // Persist for the dashboard to render. The dashboard tails this file.
+  appendLine(PERMISSION_REQUESTS_FILE, {
+    kind: "permission_request",
+    worktree: WORKTREE_NAME,
+    request_id: params.request_id,
+    tool_name: params.tool_name,
+    description: params.description,
+    input_preview: params.input_preview,
+  });
+});
+
+// --- File tailers (host → Claude Code) -------------------------------------
+
+interface TailedLine {
+  raw: string;
+  parsed: Record<string, unknown> | null;
+}
+
+function tailLines(file: string, onLine: (line: TailedLine) => void): void {
+  // Track byte offset; on each tick, read any new bytes appended since.
+  // Simpler than fs.watch and avoids editor-save race conditions because
+  // this file is only ever appended to.
+  let offset = existsSync(file) ? statSync(file).size : 0;
+  setInterval(() => {
+    if (!existsSync(file)) return;
+    const size = statSync(file).size;
+    if (size <= offset) return;
+    if (size < offset) {
+      // File was truncated/rotated — start from the beginning.
+      offset = 0;
+    }
+    const fs = require("node:fs");
+    const fd = fs.openSync(file, "r");
+    const buf = Buffer.alloc(size - offset);
+    fs.readSync(fd, buf, 0, size - offset, offset);
+    fs.closeSync(fd);
+    offset = size;
+    const text = buf.toString("utf8");
+    for (const raw of text.split("\n")) {
+      if (!raw.trim()) continue;
+      let parsed: Record<string, unknown> | null = null;
+      try {
+        parsed = JSON.parse(raw) as Record<string, unknown>;
+      } catch {
+        // skip malformed
+      }
+      onLine({ raw, parsed });
+    }
+  }, 200);
+}
+
+function checkSecret(line: Record<string, unknown> | null): boolean {
+  if (!SECRET) {
+    // No secret file present — refuse all inbound. The dashboard won't be
+    // able to send anything until cwt new generates one.
+    return false;
+  }
+  return typeof line?.secret === "string" && line.secret === SECRET;
+}
+
+// Verdicts: { secret, request_id, behavior: "allow" | "deny" }
+tailLines(PERMISSION_VERDICTS_FILE, async ({ parsed }) => {
+  if (!parsed || !checkSecret(parsed)) return;
+  const requestId = parsed.request_id;
+  const behavior = parsed.behavior;
+  if (typeof requestId !== "string") return;
+  if (behavior !== "allow" && behavior !== "deny") return;
+  try {
+    await server.notification({
+      method: "notifications/claude/channel/permission",
+      params: { request_id: requestId, behavior },
+    });
+  } catch {
+    // notification fail = claude isn't subscribed yet; drop silently
+  }
+});
+
+// Inbox: { secret, content, meta? }
+tailLines(INBOX_FILE, async ({ parsed }) => {
+  if (!parsed || !checkSecret(parsed)) return;
+  const content = parsed.content;
+  if (typeof content !== "string") return;
+  const meta =
+    typeof parsed.meta === "object" && parsed.meta !== null
+      ? (parsed.meta as Record<string, string>)
+      : {};
+  try {
+    await server.notification({
+      method: "notifications/claude/channel",
+      params: { content, meta },
+    });
+  } catch {
+    // drop silently
+  }
 });
 
 await server.connect(new StdioServerTransport());

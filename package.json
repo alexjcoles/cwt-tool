@@ -10,7 +10,7 @@
     "test": "bun test",
     "typecheck": "tsc --noEmit",
     "cwt": "bun run bin/cwt",
-    "build:channel": "bun build channel/server.ts --target=node --outfile=channel/dist/server.js && cp channel/hook.js channel/dist/hook.js"
+    "build:channel": "$HOME/.bun/bin/bun build channel/server.ts --target=node --outfile=channel/dist/server.js && cp channel/hook.js channel/dist/hook.js"
   },
   "dependencies": {
     "@devcontainers/cli": "^0.86.0",

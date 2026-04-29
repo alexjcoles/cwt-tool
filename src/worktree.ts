@@ -202,6 +202,19 @@ export async function create(opts: CreateOptions): Promise<WorktreeEntry> {
   const statusDir = statusDirForWorktree(opts.name);
   await ensureDir(statusDir);
 
+  // Generate a sender-gate secret on first create. Channel server reads it,
+  // dashboard reads it, both check incoming verdicts/messages against it.
+  // Without the secret, anything that can write to the status dir could
+  // approve tool calls on Claude's behalf.
+  const secretFile = join(statusDir, "secret");
+  if (!existsSync(secretFile)) {
+    const fs = await import("node:fs/promises");
+    const crypto = await import("node:crypto");
+    const secret = crypto.randomBytes(32).toString("hex");
+    await fs.writeFile(secretFile, secret + "\n", { mode: 0o600 });
+    log.info(`Wrote sender-gate secret to ${secretFile}`);
+  }
+
   if (!existsSync(join(CHANNEL_DIST, "server.js"))) {
     log.info("Channel server bundle missing — running build:channel");
     await runOrThrow(["bun", "run", "build:channel"], { cwd: CWT_PROJECT_ROOT });
