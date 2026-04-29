@@ -944,10 +944,21 @@ export async function runDashboard(): Promise<void> {
     await new Promise((r) => setTimeout(r, 1500));
   }
 
+  // Pre-fetch state outside the Promise executor so we can await it; the
+  // executor itself can't be async.
   const tailer: TailerState = {
     offsets: new Map(),
     resolved: new Set(),
   };
+  const initialSnapshot = await snapshot(tailer);
+
+  // Wrap the entire interactive lifecycle in an explicit Promise so that
+  // `await runDashboard()` actually waits for the user to quit instead of
+  // returning as soon as the function body finishes setting up handlers.
+  // Without this, the recursive call in runCreateFlow / runRemoveFlow would
+  // resolve instantly and the surrounding process.exit(0) would fire before
+  // the new dashboard rendered anything.
+  return new Promise<void>((resolveDashboard) => {
   const pendingQueue: PermissionRequest[] = [];
   const pendingByWorktree = new Map<string, number>();
   let mode: Mode = { kind: "normal" };
@@ -967,12 +978,24 @@ export async function runDashboard(): Promise<void> {
     process.stdout.write(SHOW_CURSOR + EXIT_ALT_SCREEN);
   };
 
-  process.on("SIGINT", () => {
+  // Resolves the outer Promise — call this for normal exits (q, SIGINT)
+  // so callers awaiting runDashboard can continue. Hard exits via
+  // process.exit(0) are still used for paths that should fully terminate
+  // the cwt process (Enter-to-attach, post-create / post-remove relaunch).
+  let resolved = false;
+  const finishCleanly = (): void => {
+    if (resolved) return;
+    resolved = true;
     cleanup();
+    resolveDashboard();
+  };
+
+  process.on("SIGINT", () => {
+    finishCleanly();
     process.exit(0);
   });
   process.on("SIGTERM", () => {
-    cleanup();
+    finishCleanly();
     process.exit(0);
   });
   process.on("exit", cleanup);
@@ -981,7 +1004,7 @@ export async function runDashboard(): Promise<void> {
   process.stdin.resume();
   process.stdin.setEncoding("utf8");
 
-  let { rows, newRequests, lastDefaults } = await snapshot(tailer);
+  let { rows, newRequests, lastDefaults } = initialSnapshot;
   // Empty state is fine — render an empty table with hints. Otherwise
   // removing the last worktree would dump the user back to the shell with
   // no way to press 'n' for a new one without re-launching cwt dashboard.
@@ -1220,8 +1243,8 @@ export async function runDashboard(): Promise<void> {
     // Normal mode
     if (chunk === "\x03" || chunk === "q") {
       clearInterval(tick);
-      cleanup();
-      process.exit(0);
+      finishCleanly();
+      return;
     } else if (chunk === "\x1b[A" || chunk === "k") {
       selected = Math.max(0, selected - 1);
       redraw();
@@ -1286,4 +1309,5 @@ export async function runDashboard(): Promise<void> {
   };
 
   process.stdin.on("data", onKey);
+  });
 }
