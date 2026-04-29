@@ -856,12 +856,16 @@ function autoLaunchClaude(
   // Shell-quote the prompt for tmux send-keys. Use absolute path because
   // tmux opens a non-login interactive shell that doesn't have
   // /home/vscode/.local/bin on PATH (claude lives there).
+  // The `--` separator is required when there's a positional prompt
+  // because --dangerously-load-development-channels is a multi-value flag
+  // that would otherwise greedily eat the prompt as another channel entry.
   const claudeCmdParts = [
     "/home/vscode/.local/bin/claude",
     "--dangerously-load-development-channels",
     "server:cwt-channel",
   ];
   if (initialPrompt) {
+    claudeCmdParts.push("--");
     // Single-quote and escape any embedded single quotes
     const safe = initialPrompt.replace(/'/g, `'\\''`);
     claudeCmdParts.push(`'${safe}'`);
