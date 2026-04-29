@@ -281,46 +281,63 @@ async function appendInbox(worktreeName: string, content: string): Promise<void>
 interface SnapshotResult {
   rows: DashboardRow[];
   newRequests: PermissionRequest[]; // NEW requests since last call, all worktrees
+  lastDefaults: import("./state.ts").LastDefaults | null;
 }
 
-function inferBranchPrefix(rows: DashboardRow[]): string | null {
-  // If existing worktrees use a username prefix in branch names (e.g.
-  // "alexc/amphtt-959-..."), apply the same to new ones for consistency.
-  if (rows.length === 0) return null;
-  const sorted = [...rows].sort((a, b) =>
-    (b.entry.createdAt ?? "").localeCompare(a.entry.createdAt ?? ""),
-  );
-  const newest = sorted[0]!;
-  const branch = newest.entry.branch;
-  if (branch.includes("/")) {
-    return branch.slice(0, branch.indexOf("/") + 1);
+function inferBranchPrefix(
+  rows: DashboardRow[],
+  persisted: { branchPrefix: string | null } | null,
+): string | null {
+  // Prefer the most recently created worktree's branch prefix; fall back to
+  // the persisted lastDefaults so 'n' still works after removing the last
+  // worktree.
+  if (rows.length > 0) {
+    const sorted = [...rows].sort((a, b) =>
+      (b.entry.createdAt ?? "").localeCompare(a.entry.createdAt ?? ""),
+    );
+    const newest = sorted[0]!;
+    const branch = newest.entry.branch;
+    if (branch.includes("/")) {
+      return branch.slice(0, branch.indexOf("/") + 1);
+    }
+    return null;
   }
-  return null;
+  return persisted?.branchPrefix ?? null;
 }
 
-function inferNewDefaults(rows: DashboardRow[]): {
+function inferNewDefaults(
+  rows: DashboardRow[],
+  persisted: {
+    repoRoot: string;
+    serviceName: string;
+    dataMount: string | null;
+  } | null,
+): {
   repoRoot: string;
   serviceName: string;
   dataMount: string | null;
 } | null {
-  // Use the most recently created worktree's settings as the template
-  // for new worktrees. Common case: a user is on one project and wants
-  // a second worktree with the same shape as the first.
-  if (rows.length === 0) return null;
-  const sorted = [...rows].sort((a, b) =>
-    (b.entry.createdAt ?? "").localeCompare(a.entry.createdAt ?? ""),
-  );
-  const newest = sorted[0]!;
-  return {
-    repoRoot: newest.entry.repoRoot,
-    serviceName: newest.entry.serviceName ?? "app",
-    dataMount: newest.entry.dataMount ?? null,
-  };
+  // Prefer most recently created worktree (covers the common case of "make
+  // another like the last one"); fall back to persisted lastDefaults so
+  // the dashboard's 'n' flow still works after removing every worktree.
+  if (rows.length > 0) {
+    const sorted = [...rows].sort((a, b) =>
+      (b.entry.createdAt ?? "").localeCompare(a.entry.createdAt ?? ""),
+    );
+    const newest = sorted[0]!;
+    return {
+      repoRoot: newest.entry.repoRoot,
+      serviceName: newest.entry.serviceName ?? "app",
+      dataMount: newest.entry.dataMount ?? null,
+    };
+  }
+  return persisted;
 }
 
 async function snapshot(tailer: TailerState): Promise<SnapshotResult> {
   const state = new State();
   const entries = await state.listWorktrees();
+  const lastDefaults = await state.getLastDefaults();
   const rows: DashboardRow[] = [];
   const newRequests: PermissionRequest[] = [];
   for (const entry of entries) {
@@ -338,7 +355,7 @@ async function snapshot(tailer: TailerState): Promise<SnapshotResult> {
       pendingPermissions: [], // filled in by caller from queue
     });
   }
-  return { rows, newRequests };
+  return { rows, newRequests, lastDefaults };
 }
 
 type Mode =
@@ -951,7 +968,7 @@ export async function runDashboard(): Promise<void> {
   process.stdin.resume();
   process.stdin.setEncoding("utf8");
 
-  let { rows, newRequests } = await snapshot(tailer);
+  let { rows, newRequests, lastDefaults } = await snapshot(tailer);
   // Empty state is fine — render an empty table with hints. Otherwise
   // removing the last worktree would dump the user back to the shell with
   // no way to press 'n' for a new one without re-launching cwt dashboard.
@@ -995,8 +1012,8 @@ export async function runDashboard(): Promise<void> {
     } else if (mode.kind === "message") {
       out += renderMessageInput(mode.targetWorktree, mode.buffer, cols, termRows);
     } else if (mode.kind === "new_worktree") {
-      const defaults = inferNewDefaults(rows);
-      const branchPrefix = inferBranchPrefix(rows);
+      const defaults = inferNewDefaults(rows, lastDefaults);
+      const branchPrefix = inferBranchPrefix(rows, lastDefaults);
       out += renderNewWorktreeInput(mode.buffer, defaults, branchPrefix, cols, termRows);
     } else if (mode.kind === "remove_confirm") {
       out += renderRemoveConfirm(mode.entry, cols, termRows);
@@ -1009,6 +1026,7 @@ export async function runDashboard(): Promise<void> {
   const tick = setInterval(async () => {
     const result = await snapshot(tailer);
     rows = result.rows;
+    lastDefaults = result.lastDefaults;
     if (selected >= rows.length) selected = Math.max(0, rows.length - 1);
 
     if (result.newRequests.length > 0) {
@@ -1124,7 +1142,7 @@ export async function runDashboard(): Promise<void> {
           redraw();
           return;
         }
-        const defaults = inferNewDefaults(rows);
+        const defaults = inferNewDefaults(rows, lastDefaults);
         if (!defaults) {
           flash("No defaults available — use `cwt new` from the host CLI");
           mode = { kind: "normal" };
@@ -1135,7 +1153,7 @@ export async function runDashboard(): Promise<void> {
         // user's terminal (docker build is long; the TUI can't render it).
         clearInterval(tick);
         cleanup();
-        const branchPrefix = inferBranchPrefix(rows);
+        const branchPrefix = inferBranchPrefix(rows, lastDefaults);
         // Run async creation flow (Linear lookup + worktree.create).
         void runCreateFlow(raw, defaults, branchPrefix);
         return;

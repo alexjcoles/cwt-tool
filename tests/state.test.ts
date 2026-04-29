@@ -98,4 +98,41 @@ describe("State", () => {
     const parsed = JSON.parse(raw);
     expect(parsed.worktrees).toHaveLength(1);
   });
+
+  test("getLastDefaults returns null when never set", async () => {
+    expect(await state.getLastDefaults()).toBeNull();
+  });
+
+  test("setLastDefaults persists across worktree removes", async () => {
+    await state.setLastDefaults({
+      repoRoot: "/path/to/repo",
+      serviceName: "rails-app",
+      dataMount: "/data",
+      branchPrefix: "alexc/",
+    });
+    await state.addWorktree(makeEntry("foo", 8000));
+    await state.removeWorktree("foo");
+    const reloaded = new State(stateFile);
+    const defaults = await reloaded.getLastDefaults();
+    expect(defaults?.repoRoot).toBe("/path/to/repo");
+    expect(defaults?.branchPrefix).toBe("alexc/");
+  });
+
+  test("setLastDefaults overwrites previous value", async () => {
+    await state.setLastDefaults({
+      repoRoot: "/old",
+      serviceName: "app",
+      dataMount: null,
+      branchPrefix: null,
+    });
+    await state.setLastDefaults({
+      repoRoot: "/new",
+      serviceName: "rails-app",
+      dataMount: "/data",
+      branchPrefix: "alexc/",
+    });
+    const defaults = await state.getLastDefaults();
+    expect(defaults?.repoRoot).toBe("/new");
+    expect(defaults?.serviceName).toBe("rails-app");
+  });
 });

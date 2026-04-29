@@ -16,9 +16,19 @@ export interface WorktreeEntry {
   createdAt: string;
 }
 
+// Persisted across removes so the dashboard can offer 'n' even when there
+// are zero current worktrees. Updated on every successful create.
+export interface LastDefaults {
+  repoRoot: string;
+  serviceName: string;
+  dataMount: string | null;
+  branchPrefix: string | null; // e.g. "alexc/"
+}
+
 export interface StateData {
   version: number;
   worktrees: WorktreeEntry[];
+  lastDefaults?: LastDefaults;
 }
 
 const EMPTY_STATE: StateData = { version: 1, worktrees: [] };
@@ -73,6 +83,17 @@ export class State {
     if (data.worktrees.length === before) {
       throw new Error(`Worktree "${name}" not found in state`);
     }
+    await this.save(data);
+  }
+
+  async getLastDefaults(): Promise<LastDefaults | null> {
+    const data = await this.load();
+    return data.lastDefaults ?? null;
+  }
+
+  async setLastDefaults(defaults: LastDefaults): Promise<void> {
+    const data = await this.load();
+    data.lastDefaults = defaults;
     await this.save(data);
   }
 

@@ -328,6 +328,20 @@ export async function create(opts: CreateOptions): Promise<WorktreeEntry> {
     createdAt: new Date().toISOString(),
   };
   await state.addWorktree(entry);
+
+  // Persist defaults so the dashboard can still offer 'n' after this and
+  // every other worktree is removed. Branch prefix is the path-prefix
+  // before the issue id, e.g. "alexc/" from "alexc/amphtt-959-...".
+  const branchPrefix = branch.includes("/")
+    ? branch.slice(0, branch.indexOf("/") + 1)
+    : null;
+  await state.setLastDefaults({
+    repoRoot,
+    serviceName,
+    dataMount,
+    branchPrefix,
+  });
+
   return entry;
 }
 
