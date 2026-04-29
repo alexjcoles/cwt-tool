@@ -379,7 +379,9 @@ export async function attach(name: string): Promise<void> {
   const composeFile = composeFilePath(entry.worktreePath);
   // Older state entries (pre-serviceName field) default to "app".
   const service = entry.serviceName ?? "app";
-  log.info(`Attaching to ${name} (Ctrl-b d to detach tmux)`);
+  log.info(`Attaching to ${name}`);
+  log.dim(`  detach: Ctrl+B  D   (session keeps running, re-attach later)`);
+  log.dim(`  exit:   Ctrl+D or 'exit'   (closes the shell)`);
   compose.execInteractive({
     projectName: entry.composeProject,
     composeFile,

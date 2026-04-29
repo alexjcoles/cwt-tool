@@ -394,7 +394,9 @@ function renderTable(opts: RenderOpts): string {
   } else if (mode.kind === "message") {
     hint = kleur.bold().cyan("MESSAGE: ") + kleur.dim("type · ENTER send · ESC cancel");
   } else {
-    hint = kleur.dim("↑↓ navigate · ENTER attach · m message · q quit");
+    hint = kleur.dim(
+      "↑↓ navigate · ENTER attach (Ctrl+B D to detach) · m message · p next prompt · q quit",
+    );
   }
   out.push(hint + CLEAR_LINE);
 
@@ -683,6 +685,13 @@ export async function runDashboard(): Promise<void> {
       if (!target) return;
       clearInterval(tick);
       cleanup();
+      // Pre-attach reminder so the user knows how to get back out before
+      // they're dropped into a tmux session.
+      process.stdout.write(
+        kleur.dim(`→ attaching to ${target.entry.name}\n`) +
+          kleur.dim(`  detach with ${kleur.bold("Ctrl+B  D")} (session keeps running)\n`) +
+          kleur.dim(`  exit shell with ${kleur.bold("Ctrl+D")} or ${kleur.bold("exit")}\n\n`),
+      );
       const { spawnSync } = require("node:child_process");
       spawnSync(
         "docker",
