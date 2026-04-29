@@ -115,14 +115,24 @@ export async function up(opts: UpOpts): Promise<string> {
     "ghcr.io/devcontainers/features/node:1": { version: "lts" },
   };
 
-  // Two cwt-side fixups that need to run on every container start:
+  // Four cwt-side fixups that need to run on every container start:
   //   1. Docker creates new named volumes root-owned, but the rails
   //      devcontainer runs as vscode — chown the shared volumes.
   //   2. tmux isn't in the rails devcontainer base image. cwt attach uses
-  //      tmux so we install it on demand. Idempotent (`|| true`).
-  const cwtFixup =
-    "sudo chown -R vscode:vscode /home/vscode/.claude /home/vscode/.config/gh 2>/dev/null || true; " +
-    "command -v tmux >/dev/null 2>&1 || sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends tmux >/dev/null 2>&1 || true";
+  //      tmux so we install it on demand. Idempotent.
+  //   3. tmux's default config eats paste. Drop a ~/.tmux.conf that turns
+  //      on clipboard passthrough + bracketed paste so OAuth codes etc.
+  //      can be pasted into cwt attach without tmux intercepting.
+  //   4. claude binary occasionally isn't installed because the project's
+  //      postCreate.sh didn't finish (lifecycle commands can race or be
+  //      skipped on recreation). Self-heal: install on every container
+  //      start if missing.
+  const cwtFixup = [
+    "sudo chown -R vscode:vscode /home/vscode/.claude /home/vscode/.config/gh 2>/dev/null || true",
+    "command -v tmux >/dev/null 2>&1 || sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends tmux >/dev/null 2>&1 || true",
+    "test -f /home/vscode/.tmux.conf || printf '%s\\n' 'set -g mouse on' 'set -g set-clipboard on' 'set -g default-terminal \"tmux-256color\"' 'set -ga terminal-overrides \",*256col*:Tc\"' 'set -s escape-time 0' 'bind-key -T copy-mode-vi v send-keys -X begin-selection' 'bind-key -T copy-mode-vi y send-keys -X copy-selection' > /home/vscode/.tmux.conf",
+    "test -x /home/vscode/.local/bin/claude || curl -fsSL https://claude.ai/install.sh | bash >/dev/null 2>&1 || true",
+  ].join("; ");
   const mergedPostStart = mergePostStart(project.postStartCommand, cwtFixup);
 
   const merged: Record<string, unknown> = {
