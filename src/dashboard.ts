@@ -766,7 +766,7 @@ async function runCreateFlow(
       if (issue) {
         name = linear.worktreeNameFromIssue(issue);
         branchSlug = name;
-        linearBranch = issue.gitBranchName;
+        linearBranch = issue.branchName;
         issueTitle = issue.title;
         process.stdout.write(kleur.green(`✓ ${issue.identifier} — ${issue.title}\n`));
       } else {

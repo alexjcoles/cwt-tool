@@ -11,7 +11,7 @@ const LINEAR_API_URL = "https://api.linear.app/graphql";
 export interface LinearIssue {
   identifier: string; // e.g. "AMPHTT-929"
   title: string;
-  gitBranchName: string; // user's configured branch name, e.g. "alexc/amphtt-929-foo-bar"
+  branchName: string; // user's configured Linear branch name, e.g. "alexc/amphtt-929-foo-bar"
   url: string;
 }
 
@@ -29,13 +29,14 @@ export async function fetchIssue(identifier: string): Promise<LinearIssue | null
   if (!apiKey) throw new LinearAuthMissingError();
 
   // Linear's GraphQL accepts the human identifier ("AMPHTT-929") directly
-  // for the `issue(id:)` query in recent API versions.
+  // for the `issue(id:)` query. The branch name field is `branchName` (the
+  // older `gitBranchName` field is not on the current schema).
   const query = `
     query CwtIssueLookup($id: String!) {
       issue(id: $id) {
         identifier
         title
-        gitBranchName
+        branchName
         url
       }
     }
@@ -50,16 +51,26 @@ export async function fetchIssue(identifier: string): Promise<LinearIssue | null
     body: JSON.stringify({ query, variables: { id: identifier } }),
   });
 
-  if (!res.ok) {
+  // Read body once and try to surface useful error details. Linear returns
+  // GraphQL errors with 400 (request malformed) and 200 (with errors[]),
+  // so we need to inspect the body in both cases.
+  const bodyText = await res.text();
+  let json: {
+    data?: { issue?: LinearIssue | null };
+    errors?: Array<{ message: string; extensions?: Record<string, unknown> }>;
+  };
+  try {
+    json = JSON.parse(bodyText);
+  } catch {
     throw new Error(
-      `Linear API ${res.status}: ${res.statusText} (have you set LINEAR_API_KEY correctly?)`,
+      `Linear API ${res.status}: non-JSON response: ${bodyText.slice(0, 200)}`,
     );
   }
 
-  const json = (await res.json()) as {
-    data?: { issue?: LinearIssue | null };
-    errors?: Array<{ message: string }>;
-  };
+  if (!res.ok) {
+    const detail = json.errors?.map((e) => e.message).join("; ") ?? bodyText.slice(0, 200);
+    throw new Error(`Linear API ${res.status}: ${detail}`);
+  }
 
   if (json.errors?.length) {
     throw new Error(`Linear API error: ${json.errors.map((e) => e.message).join("; ")}`);
