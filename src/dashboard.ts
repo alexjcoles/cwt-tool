@@ -393,7 +393,13 @@ function renderTable(opts: RenderOpts): string {
   out.push(header + CLEAR_LINE + "\n");
 
   if (rows.length === 0) {
-    out.push(kleur.dim("  (no worktrees yet — `cwt new <name>`)") + CLEAR_LINE + "\n");
+    out.push(
+      kleur.dim("  (no worktrees yet — press ") +
+        kleur.bold("n") +
+        kleur.dim(" to create one)") +
+        CLEAR_LINE +
+        "\n",
+    );
   }
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i]!;
@@ -946,11 +952,9 @@ export async function runDashboard(): Promise<void> {
   process.stdin.setEncoding("utf8");
 
   let { rows, newRequests } = await snapshot(tailer);
-  if (rows.length === 0) {
-    cleanup();
-    console.log("No worktrees yet. Try: cwt new <name>");
-    return;
-  }
+  // Empty state is fine — render an empty table with hints. Otherwise
+  // removing the last worktree would dump the user back to the shell with
+  // no way to press 'n' for a new one without re-launching cwt dashboard.
 
   const flash = (m: string, ms = 2500): void => {
     message = m;
