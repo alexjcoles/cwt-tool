@@ -504,22 +504,36 @@ function renderMessageInput(
 function renderNewWorktreeInput(
   buffer: string,
   defaults: { repoRoot: string; serviceName: string; dataMount: string | null } | null,
+  branchPrefix: string | null,
   cols: number,
   termRows: number,
 ): string {
   const out: string[] = [];
   const w = Math.min(cols - 4, 86);
-  const startRow = Math.max(2, Math.floor((termRows - 12) / 2));
+  const startRow = Math.max(2, Math.floor((termRows - 13) / 2));
   const startCol = Math.max(2, Math.floor((cols - w) / 2));
 
   const horiz = "─".repeat(w - 2);
-  const inputLine = ` name > ${buffer}` + "_";
+  const inputLine = ` issue id > ${buffer}` + "_";
+  // Show what the worktree name + branch will resolve to as the user types
+  const normalized = buffer.trim().toLowerCase();
+  const previewName = normalized || kleur.dim("(type an issue id, e.g. AMPHTT-929)");
+  const previewBranch = normalized
+    ? `${branchPrefix ?? ""}${normalized}`
+    : kleur.dim("(derived from issue id)");
 
   const lines: string[] = [
     kleur.green(`┌${horiz}┐`),
     kleur.green("│") + padAnsi(` ${kleur.bold("NEW WORKTREE")}`, w - 2) + kleur.green("│"),
     kleur.green(`├${horiz}┤`),
     kleur.green("│") + padAnsi(inputLine, w - 2) + kleur.green("│"),
+    kleur.green(`├${horiz}┤`),
+    kleur.green("│") +
+      padAnsi(` ${kleur.dim("→ name:")}   ${previewName}`, w - 2) +
+      kleur.green("│"),
+    kleur.green("│") +
+      padAnsi(` ${kleur.dim("→ branch:")} ${previewBranch}`, w - 2) +
+      kleur.green("│"),
     kleur.green(`├${horiz}┤`),
   ];
 
@@ -682,7 +696,8 @@ export async function runDashboard(): Promise<void> {
       out += renderMessageInput(mode.targetWorktree, mode.buffer, cols, termRows);
     } else if (mode.kind === "new_worktree") {
       const defaults = inferNewDefaults(rows);
-      out += renderNewWorktreeInput(mode.buffer, defaults, cols, termRows);
+      const branchPrefix = inferBranchPrefix(rows);
+      out += renderNewWorktreeInput(mode.buffer, defaults, branchPrefix, cols, termRows);
     }
     process.stdout.write(out);
   };
@@ -774,17 +789,17 @@ export async function runDashboard(): Promise<void> {
     // New worktree input
     if (mode.kind === "new_worktree") {
       if (chunk === "\r" || chunk === "\n") {
-        const name = mode.buffer.trim();
+        // Issue id is the canonical input. Normalise to lowercase so the
+        // user can type AMPHTT-929 or amphtt-929 — same result.
+        const name = mode.buffer.trim().toLowerCase();
         if (!name) {
           mode = { kind: "normal" };
-          flash("Cancelled (empty name)");
+          flash("Cancelled (empty input)");
           redraw();
           return;
         }
-        // Validate against the same pattern util.validateName uses, so we
-        // fail before exiting the TUI rather than after.
         if (!/^[a-z0-9][a-z0-9-]*$/.test(name)) {
-          flash(`Invalid name "${name}" — lowercase letters/digits/hyphens only`);
+          flash(`Invalid issue id "${name}" — letters, digits, hyphens only`);
           redraw();
           return;
         }
