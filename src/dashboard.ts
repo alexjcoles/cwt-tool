@@ -251,6 +251,41 @@ interface SnapshotResult {
   newRequests: PermissionRequest[]; // NEW requests since last call, all worktrees
 }
 
+function inferBranchPrefix(rows: DashboardRow[]): string | null {
+  // If existing worktrees use a username prefix in branch names (e.g.
+  // "alexc/amphtt-959-..."), apply the same to new ones for consistency.
+  if (rows.length === 0) return null;
+  const sorted = [...rows].sort((a, b) =>
+    (b.entry.createdAt ?? "").localeCompare(a.entry.createdAt ?? ""),
+  );
+  const newest = sorted[0]!;
+  const branch = newest.entry.branch;
+  if (branch.includes("/")) {
+    return branch.slice(0, branch.indexOf("/") + 1);
+  }
+  return null;
+}
+
+function inferNewDefaults(rows: DashboardRow[]): {
+  repoRoot: string;
+  serviceName: string;
+  dataMount: string | null;
+} | null {
+  // Use the most recently created worktree's settings as the template
+  // for new worktrees. Common case: a user is on one project and wants
+  // a second worktree with the same shape as the first.
+  if (rows.length === 0) return null;
+  const sorted = [...rows].sort((a, b) =>
+    (b.entry.createdAt ?? "").localeCompare(a.entry.createdAt ?? ""),
+  );
+  const newest = sorted[0]!;
+  return {
+    repoRoot: newest.entry.repoRoot,
+    serviceName: newest.entry.serviceName ?? "app",
+    dataMount: newest.entry.dataMount ?? null,
+  };
+}
+
 async function snapshot(tailer: TailerState): Promise<SnapshotResult> {
   const state = new State();
   const entries = await state.listWorktrees();
@@ -277,7 +312,8 @@ async function snapshot(tailer: TailerState): Promise<SnapshotResult> {
 type Mode =
   | { kind: "normal" }
   | { kind: "permission"; req: PermissionRequest }
-  | { kind: "message"; targetWorktree: string; buffer: string };
+  | { kind: "message"; targetWorktree: string; buffer: string }
+  | { kind: "new_worktree"; buffer: string };
 
 interface RenderOpts {
   rows: DashboardRow[];
@@ -395,7 +431,7 @@ function renderTable(opts: RenderOpts): string {
     hint = kleur.bold().cyan("MESSAGE: ") + kleur.dim("type · ENTER send · ESC cancel");
   } else {
     hint = kleur.dim(
-      "↑↓ navigate · ENTER attach (Ctrl+B D to detach) · m message · p next prompt · q quit",
+      "↑↓ navigate · ENTER attach (Ctrl+B D to detach) · n new · m message · p next prompt · q quit",
     );
   }
   out.push(hint + CLEAR_LINE);
@@ -459,6 +495,97 @@ function renderMessageInput(
     kleur.cyan("│") + padAnsi(inputLine, w - 2) + kleur.cyan("│"),
     kleur.cyan(`└${horiz}┘`),
   ];
+  for (let i = 0; i < lines.length; i++) {
+    out.push(moveTo(startRow + i, startCol) + lines[i]);
+  }
+  return out.join("");
+}
+
+function renderNewWorktreeInput(
+  buffer: string,
+  defaults: { repoRoot: string; serviceName: string; dataMount: string | null } | null,
+  cols: number,
+  termRows: number,
+): string {
+  const out: string[] = [];
+  const w = Math.min(cols - 4, 86);
+  const startRow = Math.max(2, Math.floor((termRows - 12) / 2));
+  const startCol = Math.max(2, Math.floor((cols - w) / 2));
+
+  const horiz = "─".repeat(w - 2);
+  const inputLine = ` name > ${buffer}` + "_";
+
+  const lines: string[] = [
+    kleur.green(`┌${horiz}┐`),
+    kleur.green("│") + padAnsi(` ${kleur.bold("NEW WORKTREE")}`, w - 2) + kleur.green("│"),
+    kleur.green(`├${horiz}┤`),
+    kleur.green("│") + padAnsi(inputLine, w - 2) + kleur.green("│"),
+    kleur.green(`├${horiz}┤`),
+  ];
+
+  if (defaults) {
+    lines.push(
+      kleur.green("│") +
+        padAnsi(
+          ` ${kleur.dim("repo:")}    ${defaults.repoRoot}`,
+          w - 2,
+        ) +
+        kleur.green("│"),
+    );
+    lines.push(
+      kleur.green("│") +
+        padAnsi(
+          ` ${kleur.dim("service:")} ${defaults.serviceName}`,
+          w - 2,
+        ) +
+        kleur.green("│"),
+    );
+    lines.push(
+      kleur.green("│") +
+        padAnsi(
+          ` ${kleur.dim("data:")}    ${defaults.dataMount ?? "(none)"}`,
+          w - 2,
+        ) +
+        kleur.green("│"),
+    );
+    lines.push(
+      kleur.green("│") +
+        padAnsi(
+          ` ${kleur.dim("branch:")}  ${kleur.dim("(defaults to name)")}`,
+          w - 2,
+        ) +
+        kleur.green("│"),
+    );
+  } else {
+    lines.push(
+      kleur.green("│") +
+        padAnsi(
+          ` ${kleur.yellow("No existing worktrees — defaults can't be inferred.")}`,
+          w - 2,
+        ) +
+        kleur.green("│"),
+    );
+    lines.push(
+      kleur.green("│") +
+        padAnsi(
+          ` ${kleur.dim("Use `cwt new` from the host CLI for the first worktree.")}`,
+          w - 2,
+        ) +
+        kleur.green("│"),
+    );
+  }
+
+  lines.push(kleur.green(`├${horiz}┤`));
+  lines.push(
+    kleur.green("│") +
+      padAnsi(
+        ` ${kleur.bold("ENTER")} create  ${kleur.bold("ESC")} cancel`,
+        w - 2,
+      ) +
+      kleur.green("│"),
+  );
+  lines.push(kleur.green(`└${horiz}┘`));
+
   for (let i = 0; i < lines.length; i++) {
     out.push(moveTo(startRow + i, startCol) + lines[i]);
   }
@@ -553,6 +680,9 @@ export async function runDashboard(): Promise<void> {
       out += renderPermissionModal(mode.req, cols, termRows);
     } else if (mode.kind === "message") {
       out += renderMessageInput(mode.targetWorktree, mode.buffer, cols, termRows);
+    } else if (mode.kind === "new_worktree") {
+      const defaults = inferNewDefaults(rows);
+      out += renderNewWorktreeInput(mode.buffer, defaults, cols, termRows);
     }
     process.stdout.write(out);
   };
@@ -641,6 +771,84 @@ export async function runDashboard(): Promise<void> {
       return;
     }
 
+    // New worktree input
+    if (mode.kind === "new_worktree") {
+      if (chunk === "\r" || chunk === "\n") {
+        const name = mode.buffer.trim();
+        if (!name) {
+          mode = { kind: "normal" };
+          flash("Cancelled (empty name)");
+          redraw();
+          return;
+        }
+        // Validate against the same pattern util.validateName uses, so we
+        // fail before exiting the TUI rather than after.
+        if (!/^[a-z0-9][a-z0-9-]*$/.test(name)) {
+          flash(`Invalid name "${name}" — lowercase letters/digits/hyphens only`);
+          redraw();
+          return;
+        }
+        const defaults = inferNewDefaults(rows);
+        if (!defaults) {
+          flash("No defaults available — use `cwt new` from the host CLI");
+          mode = { kind: "normal" };
+          redraw();
+          return;
+        }
+        // Exit TUI cleanly so create() logs stream to the user's terminal
+        // (docker build output is long; the TUI can't render it sensibly).
+        clearInterval(tick);
+        cleanup();
+        const branchPrefix = inferBranchPrefix(rows);
+        const branch = branchPrefix ? `${branchPrefix}${name}` : name;
+        process.stdout.write(
+          kleur.bold().green("→ creating worktree\n") +
+            kleur.dim(`  name:    ${name}\n`) +
+            kleur.dim(`  branch:  ${branch}\n`) +
+            kleur.dim(`  repo:    ${defaults.repoRoot}\n`) +
+            kleur.dim(`  service: ${defaults.serviceName}\n`) +
+            kleur.dim(`  data:    ${defaults.dataMount ?? "(none)"}\n\n`),
+        );
+        // Defer to keep the same control flow as the existing CLI command.
+        const { create } = require("./worktree.ts");
+        create({
+          name,
+          branch,
+          repoRoot: defaults.repoRoot,
+          serviceName: defaults.serviceName,
+          dataMount: defaults.dataMount ?? undefined,
+        })
+          .then(() => {
+            process.stdout.write(
+              "\n" +
+                kleur.green("✓ done. ") +
+                kleur.dim(`relaunch with: cwt dashboard\n`),
+            );
+            process.exit(0);
+          })
+          .catch((e: Error) => {
+            process.stderr.write(kleur.red(`✗ ${e.message}\n`));
+            process.exit(1);
+          });
+        return;
+      } else if (chunk === "\x1b") {
+        mode = { kind: "normal" };
+        flash("Cancelled");
+        redraw();
+      } else if (chunk === "\x7f" || chunk === "\b") {
+        mode = { ...mode, buffer: mode.buffer.slice(0, -1) };
+        redraw();
+      } else if (chunk === "\x03") {
+        clearInterval(tick);
+        cleanup();
+        process.exit(0);
+      } else if (chunk.length === 1 && chunk.charCodeAt(0) >= 32) {
+        mode = { ...mode, buffer: mode.buffer + chunk };
+        redraw();
+      }
+      return;
+    }
+
     // Message input
     if (mode.kind === "message") {
       if (chunk === "\r" || chunk === "\n") {
@@ -716,6 +924,9 @@ export async function runDashboard(): Promise<void> {
       const target = rows[selected];
       if (!target) return;
       mode = { kind: "message", targetWorktree: target.entry.name, buffer: "" };
+      redraw();
+    } else if (chunk === "n") {
+      mode = { kind: "new_worktree", buffer: "" };
       redraw();
     } else if (chunk === "p") {
       // Manually open the permission modal for the next pending request
