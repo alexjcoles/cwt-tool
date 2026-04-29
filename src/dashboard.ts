@@ -712,24 +712,127 @@ async function runCreateFlow(
 
   const { create } = await import("./worktree.ts");
   try {
-    await create({
+    const entry = await create({
       name,
       branch,
       repoRoot: defaults.repoRoot,
       serviceName: defaults.serviceName,
       dataMount: defaults.dataMount ?? undefined,
     });
+    // Auto-launch Claude in a detached tmux session inside the container.
+    // The session has the claude command pre-typed (NOT submitted) so the
+    // user sees it on attach and presses Enter to confirm — that handles
+    // both the dangerous-flag confirmation prompt (if not yet cached in
+    // the shared cwt-claude-config volume) and the user's choice of
+    // whether the auto-prompt is what they actually want.
+    // Pre-load /cwt-plan-minor whenever input looks like an issue id, even
+    // if Linear isn't reachable — the skill still works without the title.
+    const initialPrompt = looksLikeIssueId
+      ? `/cwt-plan-minor ${rawInput.toUpperCase()}`
+      : null;
+    process.stdout.write(kleur.dim(`→ pre-loading claude in detached tmux...\n`));
+    autoLaunchClaude(entry, initialPrompt);
     process.stdout.write(
-      "\n" + kleur.green("✓ done. ") + kleur.dim(`reopening dashboard...\n`),
+      "\n" +
+        kleur.green("✓ done. ") +
+        kleur.dim("reopening dashboard — press ENTER on the new row to attach.\n") +
+        (initialPrompt
+          ? kleur.dim(`  claude is pre-loaded with: ${kleur.cyan(initialPrompt)}\n`)
+          : kleur.dim(`  claude is pre-loaded with the channel flag.\n`)),
     );
-    // Relaunch the dashboard in-process so the user lands back on the table
-    // with the new worktree visible. No exec — same Bun process keeps state
-    // (tailer offsets are reset, which is fine).
     await runDashboard();
     process.exit(0);
   } catch (e) {
     process.stderr.write(kleur.red(`✗ ${(e as Error).message}\n`));
     process.exit(1);
+  }
+}
+
+// Spawn a detached tmux session inside the worktree's container, then type
+// the claude launch command into it (without pressing Enter — the user
+// confirms on attach). Idempotent: if the session already exists, send-keys
+// targets the existing one. Errors are logged but non-fatal — the worktree
+// is still usable, they'll just have to type the command themselves.
+function autoLaunchClaude(
+  entry: { composeProject: string; worktreePath: string; serviceName?: string },
+  initialPrompt: string | null,
+): void {
+  const { spawnSync } = require("node:child_process");
+  const composeFile = join(entry.worktreePath, ".cwt", "docker-compose.yml");
+  const service = entry.serviceName ?? "app";
+
+  // Shell-quote the prompt for tmux send-keys.
+  const claudeCmdParts = [
+    "claude",
+    "--dangerously-load-development-channels",
+    "server:cwt-channel",
+  ];
+  if (initialPrompt) {
+    // Single-quote and escape any embedded single quotes
+    const safe = initialPrompt.replace(/'/g, `'\\''`);
+    claudeCmdParts.push(`'${safe}'`);
+  }
+  const claudeCmd = claudeCmdParts.join(" ");
+
+  // Step 1: ensure the detached tmux session exists. -A attaches to existing
+  // session if present; -d means detached; -s names it.
+  const newSession = spawnSync(
+    "docker",
+    [
+      "compose",
+      "-p",
+      entry.composeProject,
+      "-f",
+      composeFile,
+      "exec",
+      "-T",
+      service,
+      "tmux",
+      "new-session",
+      "-A",
+      "-d",
+      "-s",
+      "cwt",
+    ],
+    { stdio: "pipe" },
+  );
+  if (newSession.status !== 0) {
+    process.stdout.write(
+      kleur.yellow(
+        `⚠ Could not create tmux session for auto-launch (${newSession.stderr?.toString().trim()}); you'll need to run claude manually after attach.\n`,
+      ),
+    );
+    return;
+  }
+
+  // Step 2: type the claude command into the session. NOT followed by Enter.
+  // tmux send-keys queues into the pane; the shell sees the chars when it's
+  // reading input. The user presses Enter on attach to actually run.
+  const sendKeys = spawnSync(
+    "docker",
+    [
+      "compose",
+      "-p",
+      entry.composeProject,
+      "-f",
+      composeFile,
+      "exec",
+      "-T",
+      service,
+      "tmux",
+      "send-keys",
+      "-t",
+      "cwt",
+      claudeCmd,
+    ],
+    { stdio: "pipe" },
+  );
+  if (sendKeys.status !== 0) {
+    process.stdout.write(
+      kleur.yellow(
+        `⚠ Could not pre-type claude command (${sendKeys.stderr?.toString().trim()}); you'll need to run it manually.\n`,
+      ),
+    );
   }
 }
 
