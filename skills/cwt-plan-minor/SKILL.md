@@ -142,8 +142,14 @@ The call blocks until the user answers in the dashboard. The returned text is th
 
 Branch on the answer:
 
-- If the response normalises to "approved" (case-insensitive, trimmed): `report_status('done', 'Plan approved')` and stop. The user runs `/cwt-execute` next, which picks up the plan from the branch.
-- If it's a revision request: read the response carefully, edit the plan file in place to address it, then call `await_decision` again with the same question. Loop until approved.
-- If it's something else entirely (e.g. user wants to abandon): acknowledge and stop. Do not delete the plan file — leave it for them to inspect.
+- If the response normalises to "approved" (case-insensitive, trimmed): `report_status('working', 'Plan approved; chaining into /cwt-execute')` and **invoke `cwt-execute` automatically** via the Skill tool — the user has already approved, no second gate needed:
 
-**Do NOT continue to implementation in this skill.** Approval here means "user is happy with the plan", not "start coding".
+  ```
+  Skill(skill="cwt-execute")
+  ```
+
+  The execute skill takes over from here: implementation, then auto-chains into agent-view → push → PR. This skill returns when execute returns.
+
+- If it's a revision request: read the response carefully, edit the plan file in place to address it, then call `await_decision` again with the same question. Loop until approved.
+
+- If it's something else entirely (e.g. user wants to abandon): acknowledge and stop. Do not delete the plan file — leave it for them to inspect.

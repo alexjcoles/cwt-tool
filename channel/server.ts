@@ -409,10 +409,35 @@ tailLines(DECISION_ANSWERS_FILE, async ({ parsed }) => {
 });
 
 // Inbox: { secret, content, meta? }
+//
+// If a decision is pending when an inbox message arrives, treat the message
+// as the decision answer. This makes the user's UX work either way: they
+// can respond in the dashboard's auto-popped decision modal, or they can
+// just press 'm' and send a free-form message — either resolves the
+// blocked tool call. Without this, an inbox-via-'m' message would queue
+// behind the in-flight await_decision tool, and the user would see claude
+// stuck "working" until they ctrl+c'd.
 tailLines(INBOX_FILE, async ({ parsed }) => {
   if (!parsed || !checkSecret(parsed)) return;
   const content = parsed.content;
   if (typeof content !== "string") return;
+
+  if (pendingDecisions.size > 0) {
+    // Resolve the oldest pending decision with this message as the answer.
+    const [requestId, resolver] = pendingDecisions.entries().next().value!;
+    pendingDecisions.delete(requestId);
+    appendLine(HISTORY_FILE, {
+      kind: "decision_resolved_via_inbox",
+      worktree: WORKTREE_NAME,
+      request_id: requestId,
+      answer: content,
+    });
+    resolver(content);
+    return;
+  }
+
+  // No pending decision — deliver as a normal channel notification so it
+  // appears in claude's context as <channel source="cwt-channel">.
   const meta =
     typeof parsed.meta === "object" && parsed.meta !== null
       ? (parsed.meta as Record<string, string>)
