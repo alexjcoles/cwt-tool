@@ -205,9 +205,15 @@ export function buildProgram(): Command {
 
   program
     .command("dashboard")
-    .description("Open the TUI dashboard (M3)")
-    .action(() => {
-      log.warn("`cwt dashboard` is part of Milestone 3. Not yet implemented.");
+    .description("Open the TUI dashboard — table of worktrees with live activity")
+    .action(async () => {
+      try {
+        const { runDashboard } = await import("./dashboard.ts");
+        await runDashboard();
+      } catch (e) {
+        log.error((e as Error).message);
+        process.exit(1);
+      }
     });
 
   return program;
