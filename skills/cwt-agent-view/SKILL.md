@@ -171,7 +171,35 @@ await_decision(
 
 Branch on the answer:
 
-- "push" (case-insensitive): run `git push -u origin <branch>`, then `report_status('done', 'Pushed; CI bots will run')`. Tell the user to run `/cwt-review-pr` once CI has commented.
+- "push" (case-insensitive): run `git push -u origin <branch>`, then proceed to **Step 9**.
 - Revision request: address it (additional commits), re-run from Step 2 (a new review pass on the new diff).
 
 **Do NOT push without an explicit approval.** The decision tool returns text — only `push` (case-insensitive, trimmed) is a valid push trigger.
+
+## Step 9: Push a `temp/<issue-id>` ref if the diff includes UI changes
+
+The user occasionally needs to spin up a separate dev instance against the work-in-progress branch to manually review UI behaviour. The PR branch keeps moving (more commits land during review), so they want a frozen-at-this-moment ref. Convention: `temp/amphtt-NNN` (lowercase) pointing at the same SHA as the PR branch right after push.
+
+Detect UI changes in the diff:
+
+```bash
+git diff --name-only main..HEAD | grep -E '^(app/views/|app/components/|app/javascript/|app/assets/|config/tailwind|tailwind\.config|app/helpers/)' | head -1
+```
+
+If that prints anything, the diff touches UI. (View files, view components, Stimulus controllers, asset pipeline, Tailwind config, view helpers.)
+
+If UI files are present:
+
+```bash
+ISSUE_LOWER=$(echo "AMPHTT-NNN" | tr A-Z a-z)
+TEMP_BRANCH="temp/${ISSUE_LOWER}"
+git push --force origin HEAD:"${TEMP_BRANCH}"
+```
+
+`--force` because the temp ref is intended to be overwritten on subsequent pushes — it always points at the *current* head of the PR branch, not a historical version. The user understands this.
+
+Then `report_status('done', 'Pushed; UI temp/<id> branch published; CI bots will run')` and `note` the temp branch URL so the user sees it in the dashboard.
+
+If the diff has no UI files, skip this step and just `report_status('done', 'Pushed; CI bots will run')`.
+
+In either case, tell the user to run `/cwt-review-pr` once CI has commented.
