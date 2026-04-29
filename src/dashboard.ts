@@ -128,6 +128,41 @@ function colorState(state: string): string {
   }
 }
 
+// Find the plan file for a worktree by globbing
+// <worktreePath>/docs/plans/**/<issue-id-lowercase>-*.md.
+// Returns null if no plan exists yet. Falls back to checking just the
+// numeric portion of the issue ID if linearId isn't set on the entry.
+async function findPlanForWorktree(
+  entry: WorktreeEntry,
+): Promise<string | null> {
+  const plansDir = join(entry.worktreePath, "docs", "plans");
+  if (!existsSync(plansDir)) return null;
+  const fs = await import("node:fs/promises");
+  const issueId = entry.linearId?.toLowerCase() ?? entry.name;
+  // Walk all plan files and find one whose filename matches the issue id
+  const found: string[] = [];
+  async function walk(dir: string): Promise<void> {
+    const items = await fs.readdir(dir, { withFileTypes: true });
+    for (const item of items) {
+      const full = join(dir, item.name);
+      if (item.isDirectory()) {
+        await walk(full);
+      } else if (item.isFile() && item.name.endsWith(".md")) {
+        // match amphtt-NNN-*.md or amphtt-NNN.md
+        if (item.name.toLowerCase().startsWith(issueId.toLowerCase())) {
+          found.push(full);
+        }
+      }
+    }
+  }
+  try {
+    await walk(plansDir);
+  } catch {
+    return null;
+  }
+  return found[0] ?? null;
+}
+
 // Extract the printable portion of a stdin chunk in raw mode.
 //
 // Possible chunk shapes:
@@ -363,7 +398,14 @@ type Mode =
   | { kind: "permission"; req: PermissionRequest }
   | { kind: "message"; targetWorktree: string; buffer: string }
   | { kind: "new_worktree"; buffer: string }
-  | { kind: "remove_confirm"; entry: WorktreeEntry };
+  | { kind: "remove_confirm"; entry: WorktreeEntry }
+  | {
+      kind: "view_plan";
+      entry: WorktreeEntry;
+      planPath: string;
+      lines: string[];
+      scrollOffset: number;
+    };
 
 interface RenderOpts {
   rows: DashboardRow[];
@@ -490,9 +532,13 @@ function renderTable(opts: RenderOpts): string {
     hint = kleur.bold().cyan("MESSAGE: ") + kleur.dim("type · ENTER send · ESC cancel");
   } else if (mode.kind === "remove_confirm") {
     hint = kleur.bold().red("REMOVE: ") + kleur.dim("y confirm · n cancel");
+  } else if (mode.kind === "view_plan") {
+    // Plan view renders its own footer; this hint is unused but assigned
+    // so we don't write the table-mode hint line on top of the plan body.
+    hint = "";
   } else {
     hint = kleur.dim(
-      "↑↓ navigate · ENTER attach · n new · x kill · m message · p next prompt · q quit",
+      "↑↓ navigate · ENTER attach · n new · x kill · v plan · m message · p next prompt · q quit",
     );
   }
   out.push(hint + CLEAR_LINE);
@@ -559,6 +605,69 @@ function renderMessageInput(
   for (let i = 0; i < lines.length; i++) {
     out.push(moveTo(startRow + i, startCol) + lines[i]);
   }
+  return out.join("");
+}
+
+function renderPlanView(
+  entry: WorktreeEntry,
+  planPath: string,
+  lines: string[],
+  scrollOffset: number,
+  cols: number,
+  termRows: number,
+): string {
+  const out: string[] = [];
+  out.push(HOME + CLEAR_SCREEN);
+
+  const headerRows = 3;
+  const footerRows = 2;
+  const visibleRows = Math.max(5, termRows - headerRows - footerRows);
+
+  // Header
+  const titleLine = kleur
+    .bold()
+    .bgBlue()
+    .white(` plan: ${entry.name} `);
+  const pathLine = kleur.dim(planPath);
+  out.push(titleLine + CLEAR_LINE + "\n");
+  out.push(pathLine + CLEAR_LINE + "\n");
+  out.push(kleur.dim("─".repeat(cols)) + CLEAR_LINE + "\n");
+
+  // Body — show lines[scrollOffset..scrollOffset+visibleRows]
+  const slice = lines.slice(scrollOffset, scrollOffset + visibleRows);
+  for (const line of slice) {
+    // Markdown highlighting (very light): #, ##, ### get bold; lines starting
+    // with - or | get dim color; backticks → cyan.
+    let rendered = line;
+    if (/^#+\s/.test(line)) {
+      rendered = kleur.bold().cyan(line);
+    } else if (/^\s*[-*]\s/.test(line)) {
+      rendered = kleur.dim(line);
+    }
+    // Truncate to terminal width
+    if (stripAnsi(rendered).length > cols) {
+      rendered = truncateVisible(rendered, cols);
+    }
+    out.push(rendered + CLEAR_LINE + "\n");
+  }
+  // Pad remaining rows with empty lines to clear stale content
+  for (let i = slice.length; i < visibleRows; i++) {
+    out.push(CLEAR_LINE + "\n");
+  }
+
+  // Footer
+  out.push(moveTo(termRows - 1, 1));
+  const totalLines = lines.length;
+  const start = scrollOffset + 1;
+  const end = Math.min(scrollOffset + visibleRows, totalLines);
+  const footer = kleur.dim(
+    `lines ${start}-${end} of ${totalLines}  ·  j/↓ down · k/↑ up · g top · G bottom · q/ESC close`,
+  );
+  out.push(footer + CLEAR_LINE);
+
+  out.push(moveTo(termRows, 1));
+  out.push(CLEAR_LINE);
+
   return out.join("");
 }
 
@@ -1059,6 +1168,17 @@ export async function runDashboard(): Promise<void> {
       out += renderNewWorktreeInput(mode.buffer, defaults, branchPrefix, cols, termRows);
     } else if (mode.kind === "remove_confirm") {
       out += renderRemoveConfirm(mode.entry, cols, termRows);
+    } else if (mode.kind === "view_plan") {
+      // Plan view replaces the whole screen, not a modal overlay
+      out =
+        renderPlanView(
+          mode.entry,
+          mode.planPath,
+          mode.lines,
+          mode.scrollOffset,
+          cols,
+          termRows,
+        );
     }
     process.stdout.write(out);
   };
@@ -1145,6 +1265,50 @@ export async function runDashboard(): Promise<void> {
         cleanup();
         process.exit(0);
       }
+      return;
+    }
+
+    // Plan view
+    if (mode.kind === "view_plan") {
+      const cols = process.stdout.columns ?? 120;
+      const termRows = process.stdout.rows ?? 30;
+      const visibleRows = Math.max(5, termRows - 5);
+      const maxOffset = Math.max(0, mode.lines.length - visibleRows);
+      if (chunk === "q" || chunk === "\x1b" || chunk === "\x03") {
+        mode = { kind: "normal" };
+        redraw();
+      } else if (chunk === "j" || chunk === "\x1b[B") {
+        mode = {
+          ...mode,
+          scrollOffset: Math.min(maxOffset, mode.scrollOffset + 1),
+        };
+        redraw();
+      } else if (chunk === "k" || chunk === "\x1b[A") {
+        mode = { ...mode, scrollOffset: Math.max(0, mode.scrollOffset - 1) };
+        redraw();
+      } else if (chunk === " " || chunk === "\x1b[6~") {
+        // page down
+        mode = {
+          ...mode,
+          scrollOffset: Math.min(maxOffset, mode.scrollOffset + visibleRows),
+        };
+        redraw();
+      } else if (chunk === "b" || chunk === "\x1b[5~") {
+        // page up
+        mode = {
+          ...mode,
+          scrollOffset: Math.max(0, mode.scrollOffset - visibleRows),
+        };
+        redraw();
+      } else if (chunk === "g") {
+        mode = { ...mode, scrollOffset: 0 };
+        redraw();
+      } else if (chunk === "G") {
+        mode = { ...mode, scrollOffset: maxOffset };
+        redraw();
+      }
+      // suppress cols/termRows unused warnings
+      void cols;
       return;
     }
 
@@ -1309,6 +1473,33 @@ export async function runDashboard(): Promise<void> {
       if (!target) return;
       mode = { kind: "remove_confirm", entry: target.entry };
       redraw();
+    } else if (chunk === "v") {
+      // view plan for selected worktree
+      const target = rows[selected];
+      if (!target) return;
+      void (async () => {
+        const planPath = await findPlanForWorktree(target.entry);
+        if (!planPath) {
+          flash(`No plan found yet for ${target.entry.name}`);
+          redraw();
+          return;
+        }
+        const fs = await import("node:fs/promises");
+        try {
+          const content = await fs.readFile(planPath, "utf8");
+          mode = {
+            kind: "view_plan",
+            entry: target.entry,
+            planPath,
+            lines: content.split("\n"),
+            scrollOffset: 0,
+          };
+          redraw();
+        } catch (e) {
+          flash(`Failed to read plan: ${(e as Error).message}`);
+          redraw();
+        }
+      })();
     } else if (chunk === "p") {
       // Manually open the permission modal for the next pending request
       if (pendingQueue.length === 0) {
