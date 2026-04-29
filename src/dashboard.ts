@@ -345,7 +345,8 @@ type Mode =
   | { kind: "normal" }
   | { kind: "permission"; req: PermissionRequest }
   | { kind: "message"; targetWorktree: string; buffer: string }
-  | { kind: "new_worktree"; buffer: string };
+  | { kind: "new_worktree"; buffer: string }
+  | { kind: "remove_confirm"; entry: WorktreeEntry };
 
 interface RenderOpts {
   rows: DashboardRow[];
@@ -461,9 +462,11 @@ function renderTable(opts: RenderOpts): string {
     hint = kleur.bold().yellow("PERMISSION: ") + kleur.dim("y allow · n deny · ESC dismiss");
   } else if (mode.kind === "message") {
     hint = kleur.bold().cyan("MESSAGE: ") + kleur.dim("type · ENTER send · ESC cancel");
+  } else if (mode.kind === "remove_confirm") {
+    hint = kleur.bold().red("REMOVE: ") + kleur.dim("y confirm · n cancel");
   } else {
     hint = kleur.dim(
-      "↑↓ navigate · ENTER attach (Ctrl+B D to detach) · n new · m message · p next prompt · q quit",
+      "↑↓ navigate · ENTER attach · n new · x kill · m message · p next prompt · q quit",
     );
   }
   out.push(hint + CLEAR_LINE);
@@ -527,6 +530,46 @@ function renderMessageInput(
     kleur.cyan("│") + padAnsi(inputLine, w - 2) + kleur.cyan("│"),
     kleur.cyan(`└${horiz}┘`),
   ];
+  for (let i = 0; i < lines.length; i++) {
+    out.push(moveTo(startRow + i, startCol) + lines[i]);
+  }
+  return out.join("");
+}
+
+function renderRemoveConfirm(
+  entry: WorktreeEntry,
+  cols: number,
+  termRows: number,
+): string {
+  const out: string[] = [];
+  const w = Math.min(cols - 4, 80);
+  const startRow = Math.max(2, Math.floor((termRows - 10) / 2));
+  const startCol = Math.max(2, Math.floor((cols - w) / 2));
+
+  const horiz = "─".repeat(w - 2);
+  const lines: string[] = [
+    kleur.red(`┌${horiz}┐`),
+    kleur.red("│") + padAnsi(` ${kleur.bold("REMOVE WORKTREE")}`, w - 2) + kleur.red("│"),
+    kleur.red(`├${horiz}┤`),
+    kleur.red("│") + padAnsi(` ${kleur.dim("name:")}   ${entry.name}`, w - 2) + kleur.red("│"),
+    kleur.red("│") + padAnsi(` ${kleur.dim("branch:")} ${entry.branch}`, w - 2) + kleur.red("│"),
+    kleur.red("│") + padAnsi(` ${kleur.dim("path:")}   ${entry.worktreePath}`, w - 2) + kleur.red("│"),
+    kleur.red(`├${horiz}┤`),
+    kleur.red("│") + padAnsi(` This will:`, w - 2) + kleur.red("│"),
+    kleur.red("│") + padAnsi(`   ${kleur.dim("• stop containers (compose down -v)")}`, w - 2) + kleur.red("│"),
+    kleur.red("│") + padAnsi(`   ${kleur.dim("• remove the git worktree directory")}`, w - 2) + kleur.red("│"),
+    kleur.red("│") + padAnsi(`   ${kleur.dim("• drop the cwt state entry")}`, w - 2) + kleur.red("│"),
+    kleur.red("│") + padAnsi(`   ${kleur.dim("• keep the local branch (delete with `git branch -D`)")}`, w - 2) + kleur.red("│"),
+    kleur.red(`├${horiz}┤`),
+    kleur.red("│") +
+      padAnsi(
+        `   ${kleur.bold().red("[y]")} confirm        ${kleur.bold("[n/ESC]")} cancel`,
+        w - 2,
+      ) +
+      kleur.red("│"),
+    kleur.red(`└${horiz}┘`),
+  ];
+
   for (let i = 0; i < lines.length; i++) {
     out.push(moveTo(startRow + i, startCol) + lines[i]);
   }
@@ -649,6 +692,29 @@ function renderNewWorktreeInput(
     out.push(moveTo(startRow + i, startCol) + lines[i]);
   }
   return out.join("");
+}
+
+async function runRemoveFlow(name: string): Promise<void> {
+  const { destroy } = await import("./worktree.ts");
+  try {
+    await destroy(name);
+    // Also clean up the host status dir so it doesn't sit empty next launch.
+    const fs = await import("node:fs/promises");
+    const dir = statusDirForWorktree(name);
+    try {
+      await fs.rm(dir, { recursive: true, force: true });
+    } catch {
+      // best-effort
+    }
+    process.stdout.write(
+      "\n" + kleur.green("✓ removed. ") + kleur.dim("reopening dashboard...\n"),
+    );
+    await runDashboard();
+    process.exit(0);
+  } catch (e) {
+    process.stderr.write(kleur.red(`✗ ${(e as Error).message}\n`));
+    process.exit(1);
+  }
 }
 
 async function runCreateFlow(
@@ -928,6 +994,8 @@ export async function runDashboard(): Promise<void> {
       const defaults = inferNewDefaults(rows);
       const branchPrefix = inferBranchPrefix(rows);
       out += renderNewWorktreeInput(mode.buffer, defaults, branchPrefix, cols, termRows);
+    } else if (mode.kind === "remove_confirm") {
+      out += renderRemoveConfirm(mode.entry, cols, termRows);
     }
     process.stdout.write(out);
   };
@@ -1009,6 +1077,32 @@ export async function runDashboard(): Promise<void> {
         redraw();
       } else if (chunk === "\x03") {
         // Ctrl+C
+        clearInterval(tick);
+        cleanup();
+        process.exit(0);
+      }
+      return;
+    }
+
+    // Remove confirm
+    if (mode.kind === "remove_confirm") {
+      if (chunk === "y" || chunk === "Y") {
+        const entry = mode.entry;
+        clearInterval(tick);
+        cleanup();
+        process.stdout.write(
+          "\n" +
+            kleur.bold().red("→ removing worktree\n") +
+            kleur.dim(`  name:   ${entry.name}\n`) +
+            kleur.dim(`  branch: ${entry.branch}\n\n`),
+        );
+        void runRemoveFlow(entry.name);
+        return;
+      } else if (chunk === "n" || chunk === "N" || chunk === "\x1b") {
+        mode = { kind: "normal" };
+        flash("Cancelled");
+        redraw();
+      } else if (chunk === "\x03") {
         clearInterval(tick);
         cleanup();
         process.exit(0);
@@ -1138,6 +1232,12 @@ export async function runDashboard(): Promise<void> {
       redraw();
     } else if (chunk === "n") {
       mode = { kind: "new_worktree", buffer: "" };
+      redraw();
+    } else if (chunk === "x" || chunk === "X") {
+      // open remove confirm — destructive, requires y in modal
+      const target = rows[selected];
+      if (!target) return;
+      mode = { kind: "remove_confirm", entry: target.entry };
       redraw();
     } else if (chunk === "p") {
       // Manually open the permission modal for the next pending request
