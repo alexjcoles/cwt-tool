@@ -128,6 +128,38 @@ function colorState(state: string): string {
   }
 }
 
+// Extract the printable portion of a stdin chunk in raw mode.
+//
+// Possible chunk shapes:
+//   - "x"                          single printable char (most keys)
+//   - "\x1b[A"                     arrow key / ANSI escape — return null
+//   - "\x1b[200~hello\x1b[201~"    bracketed paste with markers
+//   - "hello world"                plain paste (multi-byte chunk, no escapes)
+//   - "\r" / "\n" / "\x7f" / etc   control chars — return null
+//
+// Returns the printable chars to append, or null if the chunk should be
+// handled by other branches (escape, control, etc.).
+function extractPaste(chunk: string): string | null {
+  // Bracketed paste — strip markers, then control chars.
+  if (chunk.startsWith("\x1b[200~")) {
+    const end = chunk.indexOf("\x1b[201~");
+    const inner = end >= 0 ? chunk.slice(6, end) : chunk.slice(6);
+    const cleaned = inner.replace(/[\x00-\x1f]/g, "");
+    return cleaned || null;
+  }
+  // Other escape sequences are non-input (arrow keys etc).
+  if (chunk.startsWith("\x1b")) return null;
+  // Single printable char.
+  if (chunk.length === 1) {
+    const code = chunk.charCodeAt(0);
+    return code >= 32 && code !== 127 ? chunk : null;
+  }
+  // Multi-byte non-escape chunk — almost certainly a paste. Strip control
+  // chars (newlines, tabs, etc.) and return whatever's left.
+  const cleaned = chunk.replace(/[\x00-\x1f\x7f]/g, "");
+  return cleaned || null;
+}
+
 function relativeTime(iso: string): string {
   const seconds = Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 1000));
   if (seconds < 60) return `${seconds}s`;
@@ -515,12 +547,22 @@ function renderNewWorktreeInput(
 
   const horiz = "─".repeat(w - 2);
   const inputLine = ` issue id > ${buffer}` + "_";
-  // Show what the worktree name + branch will resolve to as the user types
+  // Show what the worktree name + branch will resolve to as the user types.
+  // Linear lookup happens on submit, so the preview shows the no-Linear
+  // fallback. The actual values may include a title-derived slug.
   const normalized = buffer.trim().toLowerCase();
+  const looksLikeIssueId = /^[a-z]+-\d+$/.test(normalized);
+  const linearAvailable = !!process.env.LINEAR_API_KEY;
   const previewName = normalized || kleur.dim("(type an issue id, e.g. AMPHTT-929)");
   const previewBranch = normalized
     ? `${branchPrefix ?? ""}${normalized}`
     : kleur.dim("(derived from issue id)");
+  const linearNote =
+    looksLikeIssueId && linearAvailable
+      ? kleur.dim("  (Linear lookup on submit will fill in title slug)")
+      : looksLikeIssueId && !linearAvailable
+        ? kleur.dim("  (set LINEAR_API_KEY for title-derived slug)")
+        : "";
 
   const lines: string[] = [
     kleur.green(`┌${horiz}┐`),
@@ -534,8 +576,11 @@ function renderNewWorktreeInput(
     kleur.green("│") +
       padAnsi(` ${kleur.dim("→ branch:")} ${previewBranch}`, w - 2) +
       kleur.green("│"),
-    kleur.green(`├${horiz}┤`),
   ];
+  if (linearNote) {
+    lines.push(kleur.green("│") + padAnsi(linearNote, w - 2) + kleur.green("│"));
+  }
+  lines.push(kleur.green(`├${horiz}┤`));
 
   if (defaults) {
     lines.push(
@@ -604,6 +649,84 @@ function renderNewWorktreeInput(
     out.push(moveTo(startRow + i, startCol) + lines[i]);
   }
   return out.join("");
+}
+
+async function runCreateFlow(
+  rawInput: string,
+  defaults: { repoRoot: string; serviceName: string; dataMount: string | null },
+  branchPrefix: string | null,
+): Promise<void> {
+  // Try to enrich via Linear if the input looks like an issue id and an
+  // API key is available. Fall back gracefully if Linear is unreachable
+  // or unconfigured — the user still gets a worktree, just without a
+  // title-derived slug.
+  const looksLikeIssueId = /^[A-Za-z]+-\d+$/.test(rawInput);
+  let name = rawInput.toLowerCase();
+  let branchSlug = name;
+  let issueTitle: string | null = null;
+  let linearBranch: string | null = null;
+
+  if (looksLikeIssueId && process.env.LINEAR_API_KEY) {
+    try {
+      process.stdout.write(kleur.dim(`→ fetching ${rawInput} from Linear...\n`));
+      const linear = await import("./linear.ts");
+      const issue = await linear.fetchIssue(rawInput.toUpperCase());
+      if (issue) {
+        name = linear.worktreeNameFromIssue(issue);
+        branchSlug = name;
+        linearBranch = issue.gitBranchName;
+        issueTitle = issue.title;
+        process.stdout.write(kleur.green(`✓ ${issue.identifier} — ${issue.title}\n`));
+      } else {
+        process.stdout.write(
+          kleur.yellow(`⚠ Linear returned no issue for ${rawInput}; using id only\n`),
+        );
+      }
+    } catch (e) {
+      process.stdout.write(
+        kleur.yellow(`⚠ Linear lookup failed: ${(e as Error).message}\n`),
+      );
+      process.stdout.write(kleur.dim(`  continuing with id-only worktree\n`));
+    }
+  }
+
+  if (!/^[a-z0-9][a-z0-9-]*$/.test(name)) {
+    process.stderr.write(kleur.red(`✗ Invalid worktree name "${name}" after derivation\n`));
+    process.exit(1);
+  }
+
+  // Branch: prefer Linear's gitBranchName (matches user's Linear branch
+  // setting), else <prefix><slug>.
+  const branch = linearBranch ?? (branchPrefix ? `${branchPrefix}${branchSlug}` : branchSlug);
+
+  process.stdout.write(
+    "\n" +
+      kleur.bold().green("→ creating worktree\n") +
+      kleur.dim(`  name:    ${name}\n`) +
+      kleur.dim(`  branch:  ${branch}\n`) +
+      (issueTitle ? kleur.dim(`  title:   ${issueTitle}\n`) : "") +
+      kleur.dim(`  repo:    ${defaults.repoRoot}\n`) +
+      kleur.dim(`  service: ${defaults.serviceName}\n`) +
+      kleur.dim(`  data:    ${defaults.dataMount ?? "(none)"}\n\n`),
+  );
+
+  const { create } = await import("./worktree.ts");
+  try {
+    await create({
+      name,
+      branch,
+      repoRoot: defaults.repoRoot,
+      serviceName: defaults.serviceName,
+      dataMount: defaults.dataMount ?? undefined,
+    });
+    process.stdout.write(
+      "\n" + kleur.green("✓ done. ") + kleur.dim(`relaunch with: cwt dashboard\n`),
+    );
+    process.exit(0);
+  } catch (e) {
+    process.stderr.write(kleur.red(`✗ ${(e as Error).message}\n`));
+    process.exit(1);
+  }
 }
 
 export async function runDashboard(): Promise<void> {
@@ -789,17 +912,10 @@ export async function runDashboard(): Promise<void> {
     // New worktree input
     if (mode.kind === "new_worktree") {
       if (chunk === "\r" || chunk === "\n") {
-        // Issue id is the canonical input. Normalise to lowercase so the
-        // user can type AMPHTT-929 or amphtt-929 — same result.
-        const name = mode.buffer.trim().toLowerCase();
-        if (!name) {
+        const raw = mode.buffer.trim();
+        if (!raw) {
           mode = { kind: "normal" };
           flash("Cancelled (empty input)");
-          redraw();
-          return;
-        }
-        if (!/^[a-z0-9][a-z0-9-]*$/.test(name)) {
-          flash(`Invalid issue id "${name}" — letters, digits, hyphens only`);
           redraw();
           return;
         }
@@ -810,41 +926,13 @@ export async function runDashboard(): Promise<void> {
           redraw();
           return;
         }
-        // Exit TUI cleanly so create() logs stream to the user's terminal
-        // (docker build output is long; the TUI can't render it sensibly).
+        // Exit TUI cleanly so Linear lookup + create() logs stream to the
+        // user's terminal (docker build is long; the TUI can't render it).
         clearInterval(tick);
         cleanup();
         const branchPrefix = inferBranchPrefix(rows);
-        const branch = branchPrefix ? `${branchPrefix}${name}` : name;
-        process.stdout.write(
-          kleur.bold().green("→ creating worktree\n") +
-            kleur.dim(`  name:    ${name}\n`) +
-            kleur.dim(`  branch:  ${branch}\n`) +
-            kleur.dim(`  repo:    ${defaults.repoRoot}\n`) +
-            kleur.dim(`  service: ${defaults.serviceName}\n`) +
-            kleur.dim(`  data:    ${defaults.dataMount ?? "(none)"}\n\n`),
-        );
-        // Defer to keep the same control flow as the existing CLI command.
-        const { create } = require("./worktree.ts");
-        create({
-          name,
-          branch,
-          repoRoot: defaults.repoRoot,
-          serviceName: defaults.serviceName,
-          dataMount: defaults.dataMount ?? undefined,
-        })
-          .then(() => {
-            process.stdout.write(
-              "\n" +
-                kleur.green("✓ done. ") +
-                kleur.dim(`relaunch with: cwt dashboard\n`),
-            );
-            process.exit(0);
-          })
-          .catch((e: Error) => {
-            process.stderr.write(kleur.red(`✗ ${e.message}\n`));
-            process.exit(1);
-          });
+        // Run async creation flow (Linear lookup + worktree.create).
+        void runCreateFlow(raw, defaults, branchPrefix);
         return;
       } else if (chunk === "\x1b") {
         mode = { kind: "normal" };
@@ -857,9 +945,12 @@ export async function runDashboard(): Promise<void> {
         clearInterval(tick);
         cleanup();
         process.exit(0);
-      } else if (chunk.length === 1 && chunk.charCodeAt(0) >= 32) {
-        mode = { ...mode, buffer: mode.buffer + chunk };
-        redraw();
+      } else {
+        const printable = extractPaste(chunk);
+        if (printable) {
+          mode = { ...mode, buffer: mode.buffer + printable };
+          redraw();
+        }
       }
       return;
     }
@@ -880,14 +971,12 @@ export async function runDashboard(): Promise<void> {
         clearInterval(tick);
         cleanup();
         process.exit(0);
-      } else if (chunk.length === 1 && chunk.charCodeAt(0) >= 32) {
-        mode = { ...mode, buffer: mode.buffer + chunk };
-        redraw();
-      } else if (chunk.length > 1 && !chunk.startsWith("\x1b")) {
-        // pasted text — accept printable chars
-        const printable = chunk.replace(/[\x00-\x1f]/g, "");
-        mode = { ...mode, buffer: mode.buffer + printable };
-        redraw();
+      } else {
+        const printable = extractPaste(chunk);
+        if (printable) {
+          mode = { ...mode, buffer: mode.buffer + printable };
+          redraw();
+        }
       }
       return;
     }
