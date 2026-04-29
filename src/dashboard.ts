@@ -853,9 +853,11 @@ function autoLaunchClaude(
   const composeFile = join(entry.worktreePath, ".cwt", "docker-compose.yml");
   const service = entry.serviceName ?? "app";
 
-  // Shell-quote the prompt for tmux send-keys.
+  // Shell-quote the prompt for tmux send-keys. Use absolute path because
+  // tmux opens a non-login interactive shell that doesn't have
+  // /home/vscode/.local/bin on PATH (claude lives there).
   const claudeCmdParts = [
-    "claude",
+    "/home/vscode/.local/bin/claude",
     "--dangerously-load-development-channels",
     "server:cwt-channel",
   ];
