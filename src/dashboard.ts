@@ -1020,11 +1020,36 @@ async function runCreateFlow(
       const linear = await import("./linear.ts");
       const issue = await linear.fetchIssue(rawInput.toUpperCase());
       if (issue) {
-        name = linear.worktreeNameFromIssue(issue);
-        branchSlug = name;
-        linearBranch = issue.branchName;
-        issueTitle = issue.title;
-        process.stdout.write(kleur.green(`✓ ${issue.identifier} — ${issue.title}\n`));
+        // Single source of truth: Linear's branchName. Strip the user prefix
+        // (e.g. "alexc/") and use the rest as both the worktree name and
+        // (with the prefix) the branch. Avoids divergence between my
+        // title-based slug and Linear's slug rules.
+        const branch = issue.branchName;
+        const slugFromBranch = branch.includes("/")
+          ? branch.slice(branch.indexOf("/") + 1)
+          : branch;
+        // Sanity check: the slug should match cwt's NAME_PATTERN
+        // (lowercase, digits, hyphens). Linear's slugs do, in practice.
+        if (/^[a-z0-9][a-z0-9-]*$/.test(slugFromBranch)) {
+          name = slugFromBranch;
+          branchSlug = slugFromBranch;
+          linearBranch = branch;
+          issueTitle = issue.title;
+          process.stdout.write(
+            kleur.green(`✓ ${issue.identifier} — ${issue.title}\n`),
+          );
+        } else {
+          // Linear gave us a branch name that doesn't fit our pattern; fall
+          // back to title-derivation so we still have a valid worktree name.
+          name = linear.worktreeNameFromIssue(issue);
+          branchSlug = name;
+          linearBranch = branch;
+          issueTitle = issue.title;
+          process.stdout.write(
+            kleur.green(`✓ ${issue.identifier} — ${issue.title}\n`) +
+              kleur.dim(`  (Linear branch slug had unexpected chars; using title-derived name)\n`),
+          );
+        }
       } else {
         process.stdout.write(
           kleur.yellow(`⚠ Linear returned no issue for ${rawInput}; using id only\n`),
@@ -1236,6 +1261,11 @@ export async function runDashboard(): Promise<void> {
   const cleanup = (): void => {
     if (stopped) return;
     stopped = true;
+    // Remove all data listeners BEFORE pausing — pause doesn't immediately
+    // drain queued events, so a second Enter pressed in quick succession was
+    // re-firing the submit handler and double-running create. Wiping our
+    // listener stops further dispatches even if events are still queued.
+    process.stdin.removeAllListeners("data");
     process.stdin.setRawMode?.(false);
     process.stdin.pause();
     process.stdout.write(SHOW_CURSOR + EXIT_ALT_SCREEN);
