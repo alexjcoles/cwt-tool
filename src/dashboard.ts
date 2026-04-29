@@ -933,6 +933,16 @@ export async function runDashboard(): Promise<void> {
     console.error("cwt dashboard requires a TTY");
     process.exit(1);
   }
+  // Optional debug dump — set CWT_DEBUG=1 to see what env vars / paths the
+  // dashboard sees at startup. Useful when "Linear: off" but you swear it's set.
+  if (process.env.CWT_DEBUG) {
+    process.stderr.write(
+      `cwt-debug: LINEAR_API_KEY=${process.env.LINEAR_API_KEY ? "set (" + process.env.LINEAR_API_KEY.slice(0, 8) + "...)" : "unset"}\n`,
+    );
+    process.stderr.write(`cwt-debug: cwd=${process.cwd()}\n`);
+    process.stderr.write(`cwt-debug: argv=${process.argv.join(" ")}\n`);
+    await new Promise((r) => setTimeout(r, 1500));
+  }
 
   const tailer: TailerState = {
     offsets: new Map(),
