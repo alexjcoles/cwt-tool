@@ -760,6 +760,66 @@ function renderMessageInput(
   return out.join("");
 }
 
+// Word-wrap a line to fit within `width` characters. Preserves indent for
+// continuation lines so wrapped bullet-list text lines up under the content
+// after the bullet, not under the bullet itself. Hard-breaks single words
+// longer than the width (URLs, etc.).
+function wrapLine(line: string, width: number): string[] {
+  if (line.length <= width) return [line];
+  const bulletMatch = /^(\s*(?:[-*+]|\d+\.)\s+)/.exec(line);
+  const indentMatch = /^(\s+)/.exec(line);
+  const continuationIndent = bulletMatch
+    ? " ".repeat(bulletMatch[1]!.length)
+    : indentMatch
+      ? indentMatch[1]!
+      : "";
+  const out: string[] = [];
+  const words = line.split(" ");
+  let current = "";
+  for (const word of words) {
+    const sep = current ? " " : "";
+    if (current.length + sep.length + word.length <= width) {
+      current += sep + word;
+      continue;
+    }
+    if (current) out.push(current);
+    if (word.length > width) {
+      // Single word longer than width — hard break.
+      let remaining = continuationIndent + word;
+      while (remaining.length > width) {
+        out.push(remaining.slice(0, width));
+        remaining = continuationIndent + remaining.slice(width);
+      }
+      current = remaining;
+    } else {
+      current = continuationIndent + word;
+    }
+  }
+  if (current) out.push(current);
+  return out;
+}
+
+// Wrap a whole document and return both the flat wrapped lines and a map
+// from each wrapped line back to its source line index (for scrollbar /
+// position display). Markdown highlighting is applied per source line so
+// every wrapped fragment of a heading is bold, etc.
+function wrapPlanLines(
+  lines: string[],
+  width: number,
+): { wrapped: string[]; total: number } {
+  const wrapped: string[] = [];
+  for (const line of lines) {
+    const fragments = wrapLine(line, width);
+    let style: ((s: string) => string) | null = null;
+    if (/^#+\s/.test(line)) style = (s) => kleur.bold().cyan(s);
+    else if (/^\s*[-*]\s/.test(line)) style = (s) => kleur.dim(s);
+    for (const frag of fragments) {
+      wrapped.push(style ? style(frag) : frag);
+    }
+  }
+  return { wrapped, total: wrapped.length };
+}
+
 function renderPlanView(
   entry: WorktreeEntry,
   planPath: string,
@@ -785,35 +845,23 @@ function renderPlanView(
   out.push(pathLine + CLEAR_LINE + "\n");
   out.push(kleur.dim("─".repeat(cols)) + CLEAR_LINE + "\n");
 
-  // Body — show lines[scrollOffset..scrollOffset+visibleRows]
-  const slice = lines.slice(scrollOffset, scrollOffset + visibleRows);
+  // Wrap all lines to terminal width with markdown styling applied.
+  const { wrapped, total } = wrapPlanLines(lines, cols);
+  const slice = wrapped.slice(scrollOffset, scrollOffset + visibleRows);
   for (const line of slice) {
-    // Markdown highlighting (very light): #, ##, ### get bold; lines starting
-    // with - or | get dim color; backticks → cyan.
-    let rendered = line;
-    if (/^#+\s/.test(line)) {
-      rendered = kleur.bold().cyan(line);
-    } else if (/^\s*[-*]\s/.test(line)) {
-      rendered = kleur.dim(line);
-    }
-    // Truncate to terminal width
-    if (stripAnsi(rendered).length > cols) {
-      rendered = truncateVisible(rendered, cols);
-    }
-    out.push(rendered + CLEAR_LINE + "\n");
+    out.push(line + CLEAR_LINE + "\n");
   }
-  // Pad remaining rows with empty lines to clear stale content
+  // Pad remaining rows so stale content is cleared on shorter scrolls
   for (let i = slice.length; i < visibleRows; i++) {
     out.push(CLEAR_LINE + "\n");
   }
 
   // Footer
   out.push(moveTo(termRows - 1, 1));
-  const totalLines = lines.length;
   const start = scrollOffset + 1;
-  const end = Math.min(scrollOffset + visibleRows, totalLines);
+  const end = Math.min(scrollOffset + visibleRows, total);
   const footer = kleur.dim(
-    `lines ${start}-${end} of ${totalLines}  ·  j/↓ down · k/↑ up · g top · G bottom · q/ESC close`,
+    `lines ${start}-${end} of ${total}  ·  j/↓ down · k/↑ up · g top · G bottom · q/ESC close`,
   );
   out.push(footer + CLEAR_LINE);
 
@@ -1562,7 +1610,10 @@ export async function runDashboard(): Promise<void> {
       const cols = process.stdout.columns ?? 120;
       const termRows = process.stdout.rows ?? 30;
       const visibleRows = Math.max(5, termRows - 5);
-      const maxOffset = Math.max(0, mode.lines.length - visibleRows);
+      // Clamp on the wrapped line count, not the raw count, so scrolling
+      // doesn't run off the end on long-lined plans.
+      const wrappedTotal = wrapPlanLines(mode.lines, cols).total;
+      const maxOffset = Math.max(0, wrappedTotal - visibleRows);
       if (chunk === "q" || chunk === "\x1b" || chunk === "\x03") {
         mode = { kind: "normal" };
         redraw();
