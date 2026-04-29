@@ -136,6 +136,36 @@ function colorState(state: string): string {
   }
 }
 
+// List the files that differ between main..HEAD in the worktree, with
+// add/delete counts. Uses host-side git (the worktree's .git is on the host
+// filesystem) so we don't need to docker exec.
+async function listDiffFiles(entry: WorktreeEntry): Promise<DiffFileStat[]> {
+  const { spawnSync } = await import("node:child_process");
+  // --numstat: "added\tdeleted\tpath" per line. Binary files show "-\t-\tpath".
+  const result = spawnSync(
+    "git",
+    ["-C", entry.worktreePath, "diff", "--numstat", "main..HEAD"],
+    { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+  );
+  if (result.status !== 0) return [];
+  const lines = result.stdout.split("\n").filter((l) => l.trim());
+  const out: DiffFileStat[] = [];
+  for (const line of lines) {
+    const parts = line.split("\t");
+    if (parts.length < 3) continue;
+    const [a, d, ...pathParts] = parts;
+    const path = pathParts.join("\t"); // path may contain tabs theoretically
+    const binary = a === "-" && d === "-";
+    out.push({
+      added: binary ? 0 : parseInt(a ?? "0", 10),
+      deleted: binary ? 0 : parseInt(d ?? "0", 10),
+      path,
+      binary,
+    });
+  }
+  return out;
+}
+
 // Find the plan file for a worktree by globbing
 // <worktreePath>/docs/plans/**/<issue-id-lowercase>-*.md.
 // Returns null if no plan exists yet. Falls back to checking just the
@@ -465,7 +495,21 @@ type Mode =
       planPath: string;
       lines: string[];
       scrollOffset: number;
+    }
+  | {
+      kind: "view_diff_files";
+      entry: WorktreeEntry;
+      files: DiffFileStat[];
+      selected: number;
+      scrollOffset: number;
     };
+
+interface DiffFileStat {
+  added: number; // null if binary
+  deleted: number;
+  path: string;
+  binary: boolean;
+}
 
 interface RenderOpts {
   rows: DashboardRow[];
@@ -603,6 +647,9 @@ function renderTable(opts: RenderOpts): string {
   } else if (mode.kind === "view_plan") {
     // Plan view renders its own footer; this hint is unused but assigned
     // so we don't write the table-mode hint line on top of the plan body.
+    hint = "";
+  } else if (mode.kind === "view_diff_files") {
+    // Diff file list renders its own footer too.
     hint = "";
   } else {
     hint = kleur.dim(
@@ -818,6 +865,79 @@ function wrapPlanLines(
     }
   }
   return { wrapped, total: wrapped.length };
+}
+
+function renderDiffFiles(
+  entry: WorktreeEntry,
+  files: DiffFileStat[],
+  selected: number,
+  scrollOffset: number,
+  cols: number,
+  termRows: number,
+): string {
+  const out: string[] = [];
+  out.push(HOME + CLEAR_SCREEN);
+
+  const headerRows = 3;
+  const footerRows = 2;
+  const visibleRows = Math.max(5, termRows - headerRows - footerRows);
+
+  // Header — title + summary (total files, total + / -).
+  let totalAdded = 0;
+  let totalDeleted = 0;
+  for (const f of files) {
+    if (!f.binary) {
+      totalAdded += f.added;
+      totalDeleted += f.deleted;
+    }
+  }
+  const titleLine = kleur
+    .bold()
+    .bgBlue()
+    .white(` git diff: ${entry.name} `);
+  const summaryLine =
+    `${files.length} file${files.length === 1 ? "" : "s"} · ` +
+    `${kleur.green(`+${totalAdded}`)} ${kleur.red(`-${totalDeleted}`)}` +
+    `  ${kleur.dim("(main..HEAD)")}`;
+  out.push(titleLine + CLEAR_LINE + "\n");
+  out.push(summaryLine + CLEAR_LINE + "\n");
+  out.push(kleur.dim("─".repeat(cols)) + CLEAR_LINE + "\n");
+
+  if (files.length === 0) {
+    out.push(kleur.dim("  (no changes between main and HEAD)") + CLEAR_LINE + "\n");
+  }
+
+  // Body — file list with stats.
+  // Adjust scroll so selected stays in view.
+  const slice = files.slice(scrollOffset, scrollOffset + visibleRows);
+  for (let i = 0; i < slice.length; i++) {
+    const file = slice[i]!;
+    const realIdx = scrollOffset + i;
+    const isSel = realIdx === selected;
+    const marker = isSel ? kleur.bold().yellow("›") : " ";
+    const stat = file.binary
+      ? kleur.magenta(padAnsi("binary", 13))
+      : `${kleur.green(("+" + file.added).padStart(5))} ${kleur.red(("-" + file.deleted).padStart(5))}  `;
+    const path = isSel ? kleur.bold(file.path) : file.path;
+    let line = `${marker} ${stat} ${path}`;
+    if (isSel) line = kleur.inverse(line);
+    out.push(line + CLEAR_LINE + "\n");
+  }
+  // Pad
+  for (let i = slice.length; i < visibleRows; i++) {
+    out.push(CLEAR_LINE + "\n");
+  }
+
+  // Footer
+  out.push(moveTo(termRows - 1, 1));
+  const footer = kleur.dim(
+    `j/↓ down · k/↑ up · ENTER view file in less · q/ESC close`,
+  );
+  out.push(footer + CLEAR_LINE);
+  out.push(moveTo(termRows, 1));
+  out.push(CLEAR_LINE);
+
+  return out.join("");
 }
 
 function renderPlanView(
@@ -1459,6 +1579,15 @@ export async function runDashboard(): Promise<void> {
           cols,
           termRows,
         );
+    } else if (mode.kind === "view_diff_files") {
+      out = renderDiffFiles(
+        mode.entry,
+        mode.files,
+        mode.selected,
+        mode.scrollOffset,
+        cols,
+        termRows,
+      );
     }
     process.stdout.write(out);
   };
@@ -1602,6 +1731,82 @@ export async function runDashboard(): Promise<void> {
           redraw();
         }
       }
+      return;
+    }
+
+    // Diff file list — select a file to view its diff in less
+    if (mode.kind === "view_diff_files") {
+      const cols = process.stdout.columns ?? 120;
+      const termRows = process.stdout.rows ?? 30;
+      const visibleRows = Math.max(5, termRows - 5);
+      if (chunk === "q" || chunk === "\x1b") {
+        mode = { kind: "normal" };
+        redraw();
+      } else if (chunk === "j" || chunk === "\x1b[B") {
+        const next = Math.min(mode.files.length - 1, mode.selected + 1);
+        let scroll = mode.scrollOffset;
+        if (next >= scroll + visibleRows) scroll = next - visibleRows + 1;
+        mode = { ...mode, selected: next, scrollOffset: scroll };
+        redraw();
+      } else if (chunk === "k" || chunk === "\x1b[A") {
+        const next = Math.max(0, mode.selected - 1);
+        let scroll = mode.scrollOffset;
+        if (next < scroll) scroll = next;
+        mode = { ...mode, selected: next, scrollOffset: scroll };
+        redraw();
+      } else if (chunk === "g") {
+        mode = { ...mode, selected: 0, scrollOffset: 0 };
+        redraw();
+      } else if (chunk === "G") {
+        const last = mode.files.length - 1;
+        mode = {
+          ...mode,
+          selected: last,
+          scrollOffset: Math.max(0, last - visibleRows + 1),
+        };
+        redraw();
+      } else if (chunk === "\r" || chunk === "\n") {
+        // Open this file's diff in less. Use host-side git (the worktree's
+        // .git is on the host filesystem) so we don't need docker exec.
+        const file = mode.files[mode.selected];
+        if (!file) return;
+        const entry = mode.entry;
+        // Capture state so we can restore the file list on return from less
+        const restoreMode = mode;
+        clearInterval(tick);
+        cleanup();
+        process.stdout.write(
+          kleur.dim(`→ git diff main..HEAD -- ${file.path}\n  q in less to return\n\n`),
+        );
+        const { spawnSync } = require("node:child_process");
+        // Use a shell so we can pipe to less. The host has both git and less.
+        spawnSync(
+          "sh",
+          [
+            "-c",
+            `git -C ${JSON.stringify(entry.worktreePath)} diff --color=always main..HEAD -- ${JSON.stringify(file.path)} | less -R`,
+          ],
+          { stdio: "inherit" },
+        );
+        // Re-enter the dashboard (alt screen + raw mode) and restore the
+        // file list mode at the same selection so the user sees where they
+        // were.
+        finishCleanly();
+        void (async () => {
+          await runDashboard();
+          process.exit(0);
+        })();
+        // Note: we lose the `restoreMode` selection because runDashboard
+        // starts fresh. Acceptable for a first cut — re-press g to come
+        // back here.
+        void restoreMode;
+        return;
+      } else if (chunk === "\x03") {
+        clearInterval(tick);
+        finishCleanly();
+        return;
+      }
+      void cols;
       return;
     }
 
@@ -1894,41 +2099,26 @@ export async function runDashboard(): Promise<void> {
       mode = { kind: "bash_input", entry: target.entry, buffer: "" };
       redraw();
     } else if (chunk === "g") {
-      // git diff main..HEAD via less
+      // Open the per-file diff navigator — list of changed files, ENTER to
+      // view individual file diffs in less.
       const target = rows[selected];
       if (!target) return;
-      clearInterval(tick);
-      cleanup();
-      const composeFile = join(target.entry.worktreePath, ".cwt", "docker-compose.yml");
-      const service = target.entry.serviceName ?? "app";
-      process.stdout.write(
-        kleur.dim(
-          `→ git diff main..HEAD in ${target.entry.name}\n  q in less to return to dashboard\n\n`,
-        ),
-      );
-      const { spawnSync } = require("node:child_process");
-      // less -R passes through colors. The base ref is `main` per project
-      // convention; if a worktree forks from a different base the user can
-      // still get useful info by ignoring the "main" branch part.
-      spawnSync(
-        "docker",
-        [
-          "compose",
-          "-p",
-          target.entry.composeProject,
-          "-f",
-          composeFile,
-          "exec",
-          service,
-          "bash",
-          "-ic",
-          `cd /workspaces/${target.entry.name} && git diff --color=always main..HEAD | less -R`,
-        ],
-        { stdio: "inherit" },
-      );
-      finishCleanly();
-      void runDashboard().then(() => process.exit(0));
-      return;
+      void (async () => {
+        const files = await listDiffFiles(target.entry);
+        if (files.length === 0) {
+          flash(`No changes between main and HEAD for ${target.entry.name}`);
+          redraw();
+          return;
+        }
+        mode = {
+          kind: "view_diff_files",
+          entry: target.entry,
+          files,
+          selected: 0,
+          scrollOffset: 0,
+        };
+        redraw();
+      })();
     } else if (chunk === "v") {
       // view plan for selected worktree
       const target = rows[selected];
