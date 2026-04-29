@@ -1288,7 +1288,13 @@ export async function runDashboard(): Promise<void> {
         ],
         { stdio: "inherit" },
       );
-      process.exit(0);
+      // tmux exited (or user detached). Re-enter the dashboard so they
+      // land back on the table instead of being dumped to the shell.
+      // The outer Promise gets resolved here; the recursive runDashboard
+      // takes over interactive control until its own quit.
+      finishCleanly();
+      void runDashboard().then(() => process.exit(0));
+      return;
     } else if (chunk === "m") {
       const target = rows[selected];
       if (!target) return;
