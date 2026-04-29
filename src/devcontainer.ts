@@ -115,7 +115,7 @@ export async function up(opts: UpOpts): Promise<string> {
     "ghcr.io/devcontainers/features/node:1": { version: "lts" },
   };
 
-  // Four cwt-side fixups that need to run on every container start:
+  // Five cwt-side fixups that need to run on every container start:
   //   1. Docker creates new named volumes root-owned, but the rails
   //      devcontainer runs as vscode — chown the shared volumes.
   //   2. tmux isn't in the rails devcontainer base image. cwt attach uses
@@ -127,11 +127,21 @@ export async function up(opts: UpOpts): Promise<string> {
   //      postCreate.sh didn't finish (lifecycle commands can race or be
   //      skipped on recreation). Self-heal: install on every container
   //      start if missing.
+  //   5. claude stores auth in TWO places: ~/.claude/.credentials.json
+  //      (in the shared volume) AND ~/.claude.json (top-level file, NOT
+  //      in the volume by default). Symlink the latter into the volume
+  //      so it persists across containers too. If the volume already has
+  //      a .claude.json (from a prior container), the symlink picks it
+  //      up; if not, replace the local file with a symlink so the next
+  //      claude write lands in the volume.
   const cwtFixup = [
     "sudo chown -R vscode:vscode /home/vscode/.claude /home/vscode/.config/gh 2>/dev/null || true",
     "command -v tmux >/dev/null 2>&1 || sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends tmux >/dev/null 2>&1 || true",
     "test -f /home/vscode/.tmux.conf || printf '%s\\n' 'set -g mouse on' 'set -g set-clipboard on' 'set -g default-terminal \"tmux-256color\"' 'set -ga terminal-overrides \",*256col*:Tc\"' 'set -s escape-time 0' 'bind-key -T copy-mode-vi v send-keys -X begin-selection' 'bind-key -T copy-mode-vi y send-keys -X copy-selection' > /home/vscode/.tmux.conf",
     "test -x /home/vscode/.local/bin/claude || curl -fsSL https://claude.ai/install.sh | bash >/dev/null 2>&1 || true",
+    // Migrate ~/.claude.json into the shared volume the first time we see
+    // it, then symlink so subsequent containers share the same file.
+    "if [ ! -L /home/vscode/.claude.json ]; then if [ -f /home/vscode/.claude/.claude.json ]; then rm -f /home/vscode/.claude.json; ln -sf /home/vscode/.claude/.claude.json /home/vscode/.claude.json; elif [ -f /home/vscode/.claude.json ]; then mv /home/vscode/.claude.json /home/vscode/.claude/.claude.json && ln -sf /home/vscode/.claude/.claude.json /home/vscode/.claude.json; else ln -sf /home/vscode/.claude/.claude.json /home/vscode/.claude.json; fi; fi",
   ].join("; ");
   const mergedPostStart = mergePostStart(project.postStartCommand, cwtFixup);
 
