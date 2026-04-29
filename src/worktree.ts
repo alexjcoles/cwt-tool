@@ -220,6 +220,23 @@ export async function create(opts: CreateOptions): Promise<WorktreeEntry> {
     await runOrThrow(["bun", "run", "build:channel"], { cwd: CWT_PROJECT_ROOT });
   }
 
+  // Pre-create the shared volumes that span all cwt worktrees. They're
+  // declared `external: true` in the compose template so `cwt rm`'s
+  // `compose down -v` never touches them — auth in cwt-claude-config /
+  // cwt-gh-config and gem caches in cwt-bundle-cache / cwt-cargo-registry
+  // need to survive a worktree being removed. `docker volume create` is
+  // idempotent: succeeds if the volume already exists.
+  for (const volName of [
+    "cwt-claude-config",
+    "cwt-gh-config",
+    "cwt-bundle-cache",
+    "cwt-cargo-registry",
+  ]) {
+    await run(["docker", "volume", "create", "--label", "cwt=shared", volName], {
+      quiet: true,
+    });
+  }
+
   // Choose Dockerfile: prefer project's existing devcontainer/Dockerfile
   // (mounted at build time as part of the worktree itself), else fall back
   // to bundled generic image.

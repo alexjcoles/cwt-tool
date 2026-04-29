@@ -96,12 +96,21 @@ networks:
     driver: bridge
 
 volumes:
+  # Per-project volume — wiped when this worktree is removed (compose down -v).
   postgres-data:
+  # Shared across all cwt worktrees — never removed by `cwt rm` because
+  # they're declared external. Pre-created by cwt new (`docker volume create`).
+  # Auth in cwt-claude-config + cwt-gh-config and gem caches in
+  # cwt-bundle-cache / cwt-cargo-registry persist across worktree lifecycles.
   cwt-bundle-cache:
+    external: true
     name: cwt-bundle-cache
   cwt-cargo-registry:
+    external: true
     name: cwt-cargo-registry
   cwt-claude-config:
+    external: true
     name: cwt-claude-config
   cwt-gh-config:
+    external: true
     name: cwt-gh-config
