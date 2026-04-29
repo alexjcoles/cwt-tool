@@ -80,7 +80,8 @@
       "LS",
       "TodoWrite",
       "mcp__cwt-channel__report_status",
-      "mcp__cwt-channel__note"
+      "mcp__cwt-channel__note",
+      "mcp__cwt-channel__await_decision"
     ]
   }
 }

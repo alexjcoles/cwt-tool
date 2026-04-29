@@ -132,20 +132,24 @@ bin/run-tests.sh --core 2>&1 | tail -5    # all tests green
 bin/rubocop 2>&1 | tail -3                # rubocop clean
 ```
 
-`report_status('done', 'Implementation complete; <N> commits, all core tests passing')` and `note` the commit count and any new files added.
+`report_status('waiting', 'Implementation complete; awaiting agent-view trigger')` and `note` the commit count and any new files added.
 
-Output a short summary in chat:
+Then call `await_decision` so the dashboard surfaces the prompt:
 
 ```
-Implementation complete.
-
-Commits: <list of subject lines>
-Files added: <list>
-Tests: <core: pass> | <system: not run in cwt-execute>
-Deferrals resolved: <count>
-Deferrals introduced: <count>
-
-Next: /cwt-agent-view for an automated peer-review pass before push.
+await_decision(
+  question="Implementation complete.\n" +
+           "Commits: <count> · Files changed: <count> · Core tests: pass\n" +
+           "Deferrals resolved: <count> · introduced: <count>\n\n" +
+           "Reply 'go' to run /cwt-agent-view (automated peer review), " +
+           "or describe what to revisit before that.",
+  options=["go"]
+)
 ```
 
-**Do NOT push.** Push happens after `/cwt-agent-view` has run and the user has approved.
+Branch on the answer:
+
+- "go" (case-insensitive): `report_status('done', 'Implementation complete; ready for agent-view')` and stop. The user runs `/cwt-agent-view` next.
+- Revision request: address it (additional commits, fixes), then call `await_decision` again.
+
+**Do NOT push** in this skill. Push happens after `/cwt-agent-view` has run and the user has separately approved.

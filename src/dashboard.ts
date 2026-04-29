@@ -52,6 +52,14 @@ interface PermissionRequest {
   input_preview: string;
 }
 
+interface DecisionRequest {
+  ts: string;
+  worktree: string;
+  request_id: string;
+  question: string;
+  options: string[];
+}
+
 interface DashboardRow {
   entry: WorktreeEntry;
   status: ChannelStatus | null;
@@ -233,33 +241,35 @@ async function readLastLines(path: string, n: number): Promise<ActivityLine[]> {
   }
 }
 
-// Permission tailer: tracks byte offset per worktree, returns NEW requests
-// since last call. `state.offsets` is mutated in place.
+// Permission + decision tailer: tracks byte offset per worktree per file
+// kind, returns NEW requests since last call. `state.offsets` is mutated.
 interface TailerState {
-  offsets: Map<string, number>;
+  offsets: Map<string, number>; // key: "<worktree>::<kind>"
   resolved: Set<string>; // request_ids we've already answered or dismissed
 }
 
-async function readNewPermissionRequests(
+async function readNewLines<T extends { request_id: string }>(
   worktreeName: string,
+  fileName: string,
   state: TailerState,
-): Promise<PermissionRequest[]> {
-  const file = join(statusDirForWorktree(worktreeName), "permission-requests.jsonl");
+): Promise<T[]> {
+  const file = join(statusDirForWorktree(worktreeName), fileName);
   if (!existsSync(file)) return [];
   const size = (await stat(file)).size;
-  const prev = state.offsets.get(worktreeName) ?? size; // skip history on first tick
+  const key = `${worktreeName}::${fileName}`;
+  const prev = state.offsets.get(key) ?? size; // skip history on first tick
   if (size <= prev) {
-    state.offsets.set(worktreeName, size);
+    state.offsets.set(key, size);
     return [];
   }
   const raw = await readFile(file, "utf8");
   const newSlice = raw.slice(prev);
-  state.offsets.set(worktreeName, size);
-  const out: PermissionRequest[] = [];
+  state.offsets.set(key, size);
+  const out: T[] = [];
   for (const line of newSlice.split("\n")) {
     if (!line.trim()) continue;
     try {
-      const parsed = JSON.parse(line) as PermissionRequest;
+      const parsed = JSON.parse(line) as T;
       if (state.resolved.has(parsed.request_id)) continue;
       out.push(parsed);
     } catch {
@@ -267,6 +277,28 @@ async function readNewPermissionRequests(
     }
   }
   return out;
+}
+
+async function readNewPermissionRequests(
+  worktreeName: string,
+  state: TailerState,
+): Promise<PermissionRequest[]> {
+  return readNewLines<PermissionRequest>(
+    worktreeName,
+    "permission-requests.jsonl",
+    state,
+  );
+}
+
+async function readNewDecisionRequests(
+  worktreeName: string,
+  state: TailerState,
+): Promise<DecisionRequest[]> {
+  return readNewLines<DecisionRequest>(
+    worktreeName,
+    "decision-requests.jsonl",
+    state,
+  );
 }
 
 async function loadSecret(worktreeName: string): Promise<string | null> {
@@ -296,6 +328,27 @@ async function appendVerdict(
   await appendFile(file, line + "\n", "utf8");
 }
 
+async function appendDecisionAnswer(
+  worktreeName: string,
+  requestId: string,
+  answer: string,
+): Promise<void> {
+  const secret = await loadSecret(worktreeName);
+  if (!secret) {
+    throw new Error(
+      `No secret file at ~/.cwt/worktrees/${worktreeName}/secret — recreate the worktree.`,
+    );
+  }
+  const file = join(statusDirForWorktree(worktreeName), "decision-answers.jsonl");
+  const line = JSON.stringify({
+    ts: new Date().toISOString(),
+    secret,
+    request_id: requestId,
+    answer,
+  });
+  await appendFile(file, line + "\n", "utf8");
+}
+
 async function appendInbox(worktreeName: string, content: string): Promise<void> {
   const secret = await loadSecret(worktreeName);
   if (!secret) {
@@ -315,7 +368,8 @@ async function appendInbox(worktreeName: string, content: string): Promise<void>
 
 interface SnapshotResult {
   rows: DashboardRow[];
-  newRequests: PermissionRequest[]; // NEW requests since last call, all worktrees
+  newRequests: PermissionRequest[]; // NEW permission requests since last call
+  newDecisions: DecisionRequest[]; // NEW decision requests since last call
   lastDefaults: import("./state.ts").LastDefaults | null;
 }
 
@@ -375,6 +429,7 @@ async function snapshot(tailer: TailerState): Promise<SnapshotResult> {
   const lastDefaults = await state.getLastDefaults();
   const rows: DashboardRow[] = [];
   const newRequests: PermissionRequest[] = [];
+  const newDecisions: DecisionRequest[] = [];
   for (const entry of entries) {
     const dir = statusDirForWorktree(entry.name);
     const status = await readJsonOrNull<ChannelStatus>(join(dir, "state.json"));
@@ -383,6 +438,9 @@ async function snapshot(tailer: TailerState): Promise<SnapshotResult> {
     const newPending = await readNewPermissionRequests(entry.name, tailer);
     newRequests.push(...newPending);
 
+    const newDecPending = await readNewDecisionRequests(entry.name, tailer);
+    newDecisions.push(...newDecPending);
+
     rows.push({
       entry,
       status,
@@ -390,12 +448,13 @@ async function snapshot(tailer: TailerState): Promise<SnapshotResult> {
       pendingPermissions: [], // filled in by caller from queue
     });
   }
-  return { rows, newRequests, lastDefaults };
+  return { rows, newRequests, newDecisions, lastDefaults };
 }
 
 type Mode =
   | { kind: "normal" }
   | { kind: "permission"; req: PermissionRequest }
+  | { kind: "decision"; req: DecisionRequest; buffer: string }
   | { kind: "message"; targetWorktree: string; buffer: string }
   | { kind: "new_worktree"; buffer: string }
   | { kind: "remove_confirm"; entry: WorktreeEntry }
@@ -528,6 +587,10 @@ function renderTable(opts: RenderOpts): string {
   let hint: string;
   if (mode.kind === "permission") {
     hint = kleur.bold().yellow("PERMISSION: ") + kleur.dim("y allow · n deny · ESC dismiss");
+  } else if (mode.kind === "decision") {
+    hint =
+      kleur.bold().magenta("DECISION: ") +
+      kleur.dim("type answer · ENTER send · ESC dismiss");
   } else if (mode.kind === "message") {
     hint = kleur.bold().cyan("MESSAGE: ") + kleur.dim("type · ENTER send · ESC cancel");
   } else if (mode.kind === "remove_confirm") {
@@ -538,7 +601,7 @@ function renderTable(opts: RenderOpts): string {
     hint = "";
   } else {
     hint = kleur.dim(
-      "↑↓ navigate · ENTER attach · n new · x kill · v plan · m message · p next prompt · q quit",
+      "↑↓ navigate · ENTER attach · n new · x kill · v plan · d decide · m msg · p perm · q quit",
     );
   }
   out.push(hint + CLEAR_LINE);
@@ -575,6 +638,90 @@ function renderPermissionModal(req: PermissionRequest, cols: number, termRows: n
     kleur.yellow("│") + padAnsi(`   ${kleur.bold().green("[y]")} allow      ${kleur.bold().red("[n]")} deny      ${kleur.dim("[ESC] dismiss")}`, w - 2) + kleur.yellow("│"),
     kleur.yellow(`└${horiz}┘`),
   ];
+
+  for (let i = 0; i < lines.length; i++) {
+    out.push(moveTo(startRow + i, startCol) + lines[i]);
+  }
+  return out.join("");
+}
+
+function renderDecisionInput(
+  req: DecisionRequest,
+  buffer: string,
+  cols: number,
+  termRows: number,
+): string {
+  const out: string[] = [];
+  const w = Math.min(cols - 4, 90);
+  // Wrap question to width-4
+  const wrapWidth = w - 4;
+  const wrapped: string[] = [];
+  for (const para of req.question.split("\n")) {
+    if (para.length <= wrapWidth) {
+      wrapped.push(para);
+      continue;
+    }
+    let line = "";
+    for (const word of para.split(" ")) {
+      if (line.length + word.length + 1 > wrapWidth) {
+        wrapped.push(line);
+        line = word;
+      } else {
+        line = line ? `${line} ${word}` : word;
+      }
+    }
+    if (line) wrapped.push(line);
+  }
+  const optionsLine =
+    req.options && req.options.length > 0
+      ? ` ${kleur.dim("preset:")} ${req.options.map((o) => kleur.bold().yellow(`[${o}]`)).join("  ")}`
+      : null;
+
+  const totalLines =
+    1 + // top border
+    1 + // title
+    1 + // separator
+    wrapped.length + // question body
+    (optionsLine ? 1 : 0) +
+    1 + // separator
+    1 + // input
+    1 + // separator
+    1 + // footer
+    1; // bottom border
+  const startRow = Math.max(2, Math.floor((termRows - totalLines) / 2));
+  const startCol = Math.max(2, Math.floor((cols - w) / 2));
+
+  const horiz = "─".repeat(w - 2);
+  const lines: string[] = [];
+  lines.push(kleur.magenta(`┌${horiz}┐`));
+  lines.push(
+    kleur.magenta("│") +
+      padAnsi(
+        ` ${kleur.bold().magenta("DECISION")} · ${kleur.dim(req.worktree)} · ${kleur.dim(req.request_id)}`,
+        w - 2,
+      ) +
+      kleur.magenta("│"),
+  );
+  lines.push(kleur.magenta(`├${horiz}┤`));
+  for (const line of wrapped) {
+    lines.push(kleur.magenta("│") + padAnsi(`  ${line}`, w - 2) + kleur.magenta("│"));
+  }
+  if (optionsLine) {
+    lines.push(kleur.magenta("│") + padAnsi(optionsLine, w - 2) + kleur.magenta("│"));
+  }
+  lines.push(kleur.magenta(`├${horiz}┤`));
+  const inputLine = ` answer > ${buffer}_`;
+  lines.push(kleur.magenta("│") + padAnsi(inputLine, w - 2) + kleur.magenta("│"));
+  lines.push(kleur.magenta(`├${horiz}┤`));
+  lines.push(
+    kleur.magenta("│") +
+      padAnsi(
+        ` ${kleur.bold("ENTER")} send  ${kleur.bold("ESC")} dismiss (no answer)`,
+        w - 2,
+      ) +
+      kleur.magenta("│"),
+  );
+  lines.push(kleur.magenta(`└${horiz}┘`));
 
   for (let i = 0; i < lines.length; i++) {
     out.push(moveTo(startRow + i, startCol) + lines[i]);
@@ -1075,6 +1222,7 @@ export async function runDashboard(): Promise<void> {
   // the new dashboard rendered anything.
   return new Promise<void>((resolveDashboard) => {
   const pendingQueue: PermissionRequest[] = [];
+  const pendingDecisionQueue: DecisionRequest[] = [];
   const pendingByWorktree = new Map<string, number>();
   let mode: Mode = { kind: "normal" };
 
@@ -1119,7 +1267,7 @@ export async function runDashboard(): Promise<void> {
   process.stdin.resume();
   process.stdin.setEncoding("utf8");
 
-  let { rows, newRequests, lastDefaults } = initialSnapshot;
+  let { rows, newRequests, newDecisions, lastDefaults } = initialSnapshot;
   // Empty state is fine — render an empty table with hints. Otherwise
   // removing the last worktree would dump the user back to the shell with
   // no way to press 'n' for a new one without re-launching cwt dashboard.
@@ -1143,6 +1291,13 @@ export async function runDashboard(): Promise<void> {
     mode = { kind: "permission", req };
   };
 
+  const enterDecisionMode = (): void => {
+    if (pendingDecisionQueue.length === 0) return;
+    if (mode.kind !== "normal") return;
+    const req = pendingDecisionQueue[0]!;
+    mode = { kind: "decision", req, buffer: "" };
+  };
+
   const redraw = (): void => {
     const cols = process.stdout.columns ?? 120;
     const termRows = process.stdout.rows ?? 30;
@@ -1160,6 +1315,8 @@ export async function runDashboard(): Promise<void> {
       });
     if (mode.kind === "permission") {
       out += renderPermissionModal(mode.req, cols, termRows);
+    } else if (mode.kind === "decision") {
+      out += renderDecisionInput(mode.req, mode.buffer, cols, termRows);
     } else if (mode.kind === "message") {
       out += renderMessageInput(mode.targetWorktree, mode.buffer, cols, termRows);
     } else if (mode.kind === "new_worktree") {
@@ -1200,6 +1357,15 @@ export async function runDashboard(): Promise<void> {
       if (mode.kind === "normal") {
         flash(`New permission request from ${result.newRequests[0]!.worktree}`);
         enterPermissionMode();
+      }
+    }
+    if (result.newDecisions.length > 0) {
+      for (const req of result.newDecisions) {
+        pendingDecisionQueue.push(req);
+      }
+      if (mode.kind === "normal") {
+        flash(`Decision needed from ${result.newDecisions[0]!.worktree}`);
+        enterDecisionMode();
       }
     }
     redraw();
@@ -1264,6 +1430,54 @@ export async function runDashboard(): Promise<void> {
         clearInterval(tick);
         cleanup();
         process.exit(0);
+      }
+      return;
+    }
+
+    // Decision input
+    if (mode.kind === "decision") {
+      if (chunk === "\r" || chunk === "\n") {
+        const text = mode.buffer.trim();
+        const req = mode.req;
+        if (!text) {
+          flash("Empty answer — type something or press ESC");
+          redraw();
+          return;
+        }
+        void (async () => {
+          try {
+            await appendDecisionAnswer(req.worktree, req.request_id, text);
+            tailer.resolved.add(req.request_id);
+            pendingDecisionQueue.shift();
+            flash(`✓ sent "${text}" to ${req.worktree}`);
+            mode = { kind: "normal" };
+            if (pendingDecisionQueue.length > 0) enterDecisionMode();
+          } catch (e) {
+            flash(`Error: ${(e as Error).message}`);
+            mode = { kind: "normal" };
+          }
+          redraw();
+        })();
+        return;
+      } else if (chunk === "\x1b") {
+        // ESC dismisses without answering — claude is still blocked. The
+        // request stays in the queue so user can re-open via 'd'.
+        mode = { kind: "normal" };
+        flash("Dismissed (decision still pending in claude)");
+        redraw();
+      } else if (chunk === "\x7f" || chunk === "\b") {
+        mode = { ...mode, buffer: mode.buffer.slice(0, -1) };
+        redraw();
+      } else if (chunk === "\x03") {
+        clearInterval(tick);
+        finishCleanly();
+        return;
+      } else {
+        const printable = extractPaste(chunk);
+        if (printable) {
+          mode = { ...mode, buffer: mode.buffer + printable };
+          redraw();
+        }
       }
       return;
     }
@@ -1506,6 +1720,14 @@ export async function runDashboard(): Promise<void> {
         flash("No pending permission requests");
       } else {
         enterPermissionMode();
+      }
+      redraw();
+    } else if (chunk === "d") {
+      // Manually open the decision modal for the next pending decision
+      if (pendingDecisionQueue.length === 0) {
+        flash("No pending decisions");
+      } else {
+        enterDecisionMode();
       }
       redraw();
     }

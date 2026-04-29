@@ -123,19 +123,27 @@ Re-read your plan file. Walk the required-sections checklist. Verify:
 
 If any check fails, fix the plan and re-read.
 
-## Step 11: Hand off to the user
+## Step 11: Hand off to the user via the dashboard
 
-`report_status('waiting', 'Plan written; awaiting user approval', PLAN_PATH)` and `note` the path of the plan file.
+`report_status('waiting', 'Plan written; awaiting user approval', PLAN_PATH)`.
 
-Output a short summary in the chat (not the plan body — they can read the file):
+Then call `await_decision` so the dashboard surfaces the prompt as a modal instead of forcing the user to attach to your tmux session:
 
 ```
-Plan written: <PLAN_PATH>
-Deliverables: <count>
-Java alignment: <Yes / N/A>
-Deferrals resolved by this plan: <count>
-
-Reply "approved" to proceed to /cwt-execute, or describe what to change.
+await_decision(
+  question="Plan written at <PLAN_PATH>.\n" +
+           "<count> deliverables · Java alignment: <Yes / N/A> · <count> deferrals resolved.\n\n" +
+           "Reply 'approved' to proceed to /cwt-execute, or describe what to change.",
+  options=["approved"]
+)
 ```
 
-**Do NOT continue to implementation.** The user reviews the plan file and either approves or asks for revisions. If they ask for revisions, edit the plan in place; don't re-run from step 1.
+The call blocks until the user answers in the dashboard. The returned text is their response.
+
+Branch on the answer:
+
+- If the response normalises to "approved" (case-insensitive, trimmed): `report_status('done', 'Plan approved')` and stop. The user runs `/cwt-execute` next, which picks up the plan from the branch.
+- If it's a revision request: read the response carefully, edit the plan file in place to address it, then call `await_decision` again with the same question. Loop until approved.
+- If it's something else entirely (e.g. user wants to abandon): acknowledge and stop. Do not delete the plan file — leave it for them to inspect.
+
+**Do NOT continue to implementation in this skill.** Approval here means "user is happy with the plan", not "start coding".

@@ -148,11 +148,31 @@ For DEFER items, estimate scope (1-5) and suggest whether it warrants a new Line
 
 `report_status('waiting', 'Triage complete; <N> fix / <N> leave / <N> defer; awaiting user approval')`.
 
-## Step 6: Get user approval
+## Step 6: Get user approval via the dashboard
 
-Ask: *"Proceed with the above triage? You can change any item (e.g. 'change 2 to FIX', 'defer 1 instead'). Reply 'approved' or describe changes."*
+`report_status('waiting', '<N> findings triaged; awaiting approval')`.
 
-Wait for explicit approval. Do not proceed until the user confirms.
+Call `await_decision` so the prompt appears in the dashboard:
+
+```
+await_decision(
+  question="PR triage ready: <N> FIX · <N> LEAVE · <N> DEFER.\n\n" +
+           "Top 3 FIX items:\n" +
+           "  1. <title> (<reviewer>)\n" +
+           "  2. <title> (<reviewer>)\n" +
+           "  3. <title> (<reviewer>)\n\n" +
+           "Reply 'approved' to apply the triage as-is, or describe changes " +
+           "(e.g. 'change 2 to FIX', 'defer 1 instead').",
+  options=["approved"]
+)
+```
+
+Branch on the answer:
+
+- "approved" (case-insensitive): proceed to Step 7.
+- Revision request: parse the user's adjustments, update the triage, present the revised summary via `await_decision` again.
+
+Do not proceed until the user confirms the (possibly revised) triage.
 
 ## Step 7: Implement approved fixes
 
@@ -211,19 +231,21 @@ Read `docs/templates/pr-review-reply.md` (if present) for the project's reply fo
 
 **Do not reply to**: architectural review summaries where everything passed, informational comments, walkthrough summaries.
 
-Show all draft replies in one block:
+Show all draft replies in one block to the chat (transcript is the record), then ask via `await_decision`:
 
-```markdown
-### Draft PR replies (will be posted after your approval)
-
-**Reply to <reviewer> on <file>:<line>** (<FIX/LEAVE/DEFER>):
-> <reply text>
-
-**Reply to <reviewer> (general comment)** (<FIX/LEAVE/DEFER>):
-> <reply text>
+```
+await_decision(
+  question="<N> draft replies ready (see above).\n" +
+           "Reply 'post' to send them all, or 'skip' to apply code changes " +
+           "without posting.",
+  options=["post", "skip"]
+)
 ```
 
-Wait for explicit approval. Then post:
+If "post": continue to the gh api calls below.
+If "skip" or anything else: skip posting; the code changes and plan amendments still stand.
+
+When posting:
 
 - Inline review comments:
 

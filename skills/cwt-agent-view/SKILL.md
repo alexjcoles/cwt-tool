@@ -155,17 +155,23 @@ bin/run-tests.sh --core 2>&1 | tail -5
 bin/rubocop 2>&1 | tail -3
 ```
 
-If both clean: `report_status('done', 'Peer review clean after <N> pass(es); ready for push')`.
+If both clean: `report_status('waiting', 'Peer review clean; awaiting push approval')`.
 
-Output a summary:
+Then call `await_decision` so the dashboard surfaces the push gate:
 
 ```
-Peer review complete after <N> pass(es).
-- Findings addressed: <count>
-- LEAVE items (annotated for human reviewer): <count>
-- New commits added by review pass: <count>
-
-Reply "push" to proceed, or describe what to revisit.
+await_decision(
+  question="Peer review clean after <N> pass(es).\n" +
+           "Findings addressed: <count> · LEAVE annotated: <count> · " +
+           "review-pass commits: <count>\n\n" +
+           "Reply 'push' to git push the branch, or describe what to revisit.",
+  options=["push"]
+)
 ```
 
-**Do NOT `git push`** automatically. Push is the user's call.
+Branch on the answer:
+
+- "push" (case-insensitive): run `git push -u origin <branch>`, then `report_status('done', 'Pushed; CI bots will run')`. Tell the user to run `/cwt-review-pr` once CI has commented.
+- Revision request: address it (additional commits), re-run from Step 2 (a new review pass on the new diff).
+
+**Do NOT push without an explicit approval.** The decision tool returns text — only `push` (case-insensitive, trimmed) is a valid push trigger.

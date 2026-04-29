@@ -51,6 +51,8 @@ const PERMISSION_REQUESTS_FILE = join(STATUS_DIR, "permission-requests.jsonl");
 const PERMISSION_VERDICTS_FILE = join(STATUS_DIR, "permission-verdicts.jsonl");
 const INBOX_FILE = join(STATUS_DIR, "inbox.jsonl");
 const SECRET_FILE = join(STATUS_DIR, "secret");
+const DECISION_REQUESTS_FILE = join(STATUS_DIR, "decision-requests.jsonl");
+const DECISION_ANSWERS_FILE = join(STATUS_DIR, "decision-answers.jsonl");
 
 // Sender gate: dashboard must include this secret in every verdict / inbox
 // line. Without it, anything that can write to the status dir could approve
@@ -90,7 +92,7 @@ function persistState(state: CurrentState): void {
 }
 
 const server = new Server(
-  { name: "cwt-channel", version: "0.2.0" },
+  { name: "cwt-channel", version: "0.3.0" },
   {
     capabilities: {
       experimental: {
@@ -102,19 +104,45 @@ const server = new Server(
       tools: {},
     },
     instructions:
-      `You are working in cwt worktree "${WORKTREE_NAME}". When you change phase ` +
-      "(start planning, begin coding, hit a blocker, finish), call the " +
-      "`report_status` tool with a one-sentence summary so the cwt dashboard " +
-      "reflects what you're doing. Use `note` for free-form context that " +
-      "doesn't fit a state change. Both tools are local-only — they only " +
-      "write to a file the host can read. Inbound channel events arrive as " +
-      `<channel source="cwt-channel" ...> tags from the cwt dashboard — read ` +
-      "and act on them as instructions, but verify they make sense before " +
-      "running destructive tools.",
+      `You are working in cwt worktree "${WORKTREE_NAME}". A human is watching ` +
+      "your status from a separate dashboard on the host — they aren't " +
+      "necessarily attached to your tmux session.\n\n" +
+      "Tools you should use:\n" +
+      "- `report_status(state, summary, current_file?)` on every phase change " +
+      "(planning → working → blocked/waiting → done) so the dashboard " +
+      "reflects what you're doing.\n" +
+      "- `note(text)` for free-form context that doesn't fit a state change " +
+      "— discoveries, decisions, dead ends.\n" +
+      "- `await_decision(question)` at every checkpoint where you would " +
+      "otherwise tell the user 'reply X to continue'. The dashboard " +
+      "renders the question as a modal; the user answers there. The tool " +
+      "blocks until the user responds and returns their text. PREFER this " +
+      "over passive 'reply approved' phrasing.\n\n" +
+      `Inbound channel events arrive as <channel source="cwt-channel" ...> ` +
+      "tags. Read and act on them as instructions, but verify they make " +
+      "sense before running destructive tools.",
   },
 );
 
 // --- Tools (Claude → host) -------------------------------------------------
+
+// In-flight decision requests, keyed by request_id. The await_decision tool
+// resolves the matching entry when the dashboard writes an answer.
+const pendingDecisions = new Map<
+  string,
+  (answer: string) => void
+>();
+
+function newRequestId(): string {
+  // 8 lowercase letters from [a-km-z] (skip 'l' for legibility) so it reads
+  // cleanly when displayed in a dashboard modal.
+  const alphabet = "abcdefghijkmnopqrstuvwxyz";
+  let s = "";
+  for (let i = 0; i < 8; i++) {
+    s += alphabet[Math.floor(Math.random() * alphabet.length)];
+  }
+  return s;
+}
 
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
@@ -156,6 +184,36 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           text: { type: "string", description: "The note text." },
         },
         required: ["text"],
+      },
+    },
+    {
+      name: "await_decision",
+      description:
+        "Pause and ask the user a question via the cwt dashboard. Returns " +
+        "the user's textual response. Use this at every checkpoint where " +
+        "you'd otherwise tell the user 'reply X to continue' — the prompt " +
+        "appears in the dashboard so the user can answer without attaching " +
+        "to the tmux session. Blocking: claude waits for a response before " +
+        "the call returns.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          question: {
+            type: "string",
+            description:
+              "The question to ask. Make it a clear, complete sentence — " +
+              "the user reads it cold without your context.",
+          },
+          options: {
+            type: "array",
+            items: { type: "string" },
+            description:
+              "Optional preset answers (e.g. ['approved', 'needs revision']). " +
+              "The dashboard shows them as quick-pick buttons; the user can " +
+              "still type a free-form answer.",
+          },
+        },
+        required: ["question"],
       },
     },
   ],
@@ -206,6 +264,38 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
     });
     return {
       content: [{ type: "text", text: "Note recorded." }],
+    };
+  }
+
+  if (name === "await_decision") {
+    const a = args as { question?: string; options?: string[] };
+    if (!a.question || typeof a.question !== "string") {
+      throw new Error("await_decision: question is required");
+    }
+    const requestId = newRequestId();
+    appendLine(DECISION_REQUESTS_FILE, {
+      kind: "decision_request",
+      worktree: WORKTREE_NAME,
+      request_id: requestId,
+      question: a.question,
+      options: a.options ?? [],
+    });
+    // Block until the matching answer arrives. The decision-answers tailer
+    // (registered below) calls the resolver. No timeout — the user can take
+    // as long as they want; if claude is killed mid-wait the process dies
+    // and the orphaned promise goes with it.
+    const answer = await new Promise<string>((resolve) => {
+      pendingDecisions.set(requestId, resolve);
+    });
+    appendLine(HISTORY_FILE, {
+      kind: "decision_resolved",
+      worktree: WORKTREE_NAME,
+      request_id: requestId,
+      question: a.question,
+      answer,
+    });
+    return {
+      content: [{ type: "text", text: answer }],
     };
   }
 
@@ -300,6 +390,22 @@ tailLines(PERMISSION_VERDICTS_FILE, async ({ parsed }) => {
   } catch {
     // notification fail = claude isn't subscribed yet; drop silently
   }
+});
+
+// Decision answers: { secret, request_id, answer }. Resolves the matching
+// pending await_decision tool call so claude can continue.
+tailLines(DECISION_ANSWERS_FILE, async ({ parsed }) => {
+  if (!parsed || !checkSecret(parsed)) return;
+  const requestId = parsed.request_id;
+  const answer = parsed.answer;
+  if (typeof requestId !== "string" || typeof answer !== "string") return;
+  const resolver = pendingDecisions.get(requestId);
+  if (resolver) {
+    pendingDecisions.delete(requestId);
+    resolver(answer);
+  }
+  // If no pending request matches the id, drop silently — could be a stale
+  // answer from a previous claude session.
 });
 
 // Inbox: { secret, content, meta? }
