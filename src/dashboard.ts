@@ -309,6 +309,48 @@ async function readNewLines<T extends { request_id: string }>(
   return out;
 }
 
+// Load every decision request that hasn't been answered yet for a worktree.
+// Used at dashboard startup to surface decisions that were issued BEFORE
+// the dashboard launched — without this, the byte-offset tailer skips
+// historic content and pending requests are invisible.
+async function loadPendingDecisions(
+  worktreeName: string,
+): Promise<DecisionRequest[]> {
+  const dir = statusDirForWorktree(worktreeName);
+  const requestsFile = join(dir, "decision-requests.jsonl");
+  if (!existsSync(requestsFile)) return [];
+
+  const requestsRaw = await readFile(requestsFile, "utf8");
+  const allRequests: DecisionRequest[] = [];
+  for (const line of requestsRaw.split("\n")) {
+    if (!line.trim()) continue;
+    try {
+      allRequests.push(JSON.parse(line) as DecisionRequest);
+    } catch {
+      // skip malformed
+    }
+  }
+
+  const answersFile = join(dir, "decision-answers.jsonl");
+  const answeredIds = new Set<string>();
+  if (existsSync(answersFile)) {
+    const answersRaw = await readFile(answersFile, "utf8");
+    for (const line of answersRaw.split("\n")) {
+      if (!line.trim()) continue;
+      try {
+        const parsed = JSON.parse(line) as { request_id?: string };
+        if (typeof parsed.request_id === "string") {
+          answeredIds.add(parsed.request_id);
+        }
+      } catch {
+        // skip malformed
+      }
+    }
+  }
+
+  return allRequests.filter((r) => !answeredIds.has(r.request_id));
+}
+
 async function readNewPermissionRequests(
   worktreeName: string,
   state: TailerState,
@@ -1450,6 +1492,20 @@ export async function runDashboard(): Promise<void> {
   };
   const initialSnapshot = await snapshot(tailer);
 
+  // Surface any decisions that are pending from BEFORE the dashboard
+  // launched (snapshot's byte-offset tailer only catches NEW entries).
+  // For each worktree, find requests not yet answered.
+  const initialPendingDecisions: DecisionRequest[] = [];
+  for (const row of initialSnapshot.rows) {
+    const pending = await loadPendingDecisions(row.entry.name);
+    initialPendingDecisions.push(...pending);
+    for (const req of pending) {
+      // Mark as already-handled-by-tailer so it doesn't fire again when
+      // the file grows past its current size.
+      tailer.resolved.add(req.request_id);
+    }
+  }
+
   // Wrap the entire interactive lifecycle in an explicit Promise so that
   // `await runDashboard()` actually waits for the user to quit instead of
   // returning as soon as the function body finishes setting up handlers.
@@ -1509,6 +1565,10 @@ export async function runDashboard(): Promise<void> {
   process.stdin.setEncoding("utf8");
 
   let { rows, newRequests, newDecisions, lastDefaults } = initialSnapshot;
+  // Seed the queue with the pre-existing pending decisions we loaded above.
+  for (const req of initialPendingDecisions) {
+    pendingDecisionQueue.push(req);
+  }
   // Empty state is fine — render an empty table with hints. Otherwise
   // removing the last worktree would dump the user back to the shell with
   // no way to press 'n' for a new one without re-launching cwt dashboard.
@@ -1591,6 +1651,16 @@ export async function runDashboard(): Promise<void> {
     }
     process.stdout.write(out);
   };
+
+  // If there are pre-existing pending decisions, pop the first one's modal
+  // so the user immediately sees what claude is waiting on — not just an
+  // unhighlighted "waiting" row in the table.
+  if (pendingDecisionQueue.length > 0) {
+    flash(
+      `${pendingDecisionQueue.length} pending decision${pendingDecisionQueue.length === 1 ? "" : "s"} from before dashboard started`,
+    );
+    enterDecisionMode();
+  }
 
   redraw();
 
