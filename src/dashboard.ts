@@ -287,7 +287,13 @@ async function readNewLines<T extends { request_id: string }>(
   if (!existsSync(file)) return [];
   const size = (await stat(file)).size;
   const key = `${worktreeName}::${fileName}`;
-  const prev = state.offsets.get(key) ?? size; // skip history on first tick
+  // Default to 0 (read from start) so files that didn't exist when the
+  // dashboard started — e.g. a brand-new worktree's decision-requests.jsonl
+  // appearing mid-session — are read in full. Files that DID exist at
+  // startup are explicitly seeded with their then-current size, so this
+  // default doesn't accidentally replay history. tailer.resolved
+  // deduplicates anything we've already seen via loadPendingDecisions.
+  const prev = state.offsets.get(key) ?? 0;
   if (size <= prev) {
     state.offsets.set(key, size);
     return [];
@@ -309,30 +315,41 @@ async function readNewLines<T extends { request_id: string }>(
   return out;
 }
 
-// Load every decision request that hasn't been answered yet for a worktree.
-// Used at dashboard startup to surface decisions that were issued BEFORE
-// the dashboard launched — without this, the byte-offset tailer skips
-// historic content and pending requests are invisible.
-async function loadPendingDecisions(
-  worktreeName: string,
-): Promise<DecisionRequest[]> {
+interface DecisionsLoad {
+  pending: DecisionRequest[];
+  answeredIds: Set<string>;
+  allRequestIds: Set<string>;
+}
+
+// Walk a worktree's decision-requests.jsonl and decision-answers.jsonl,
+// returning what's pending and what's answered. Used at dashboard startup
+// to (a) surface still-pending decisions even though the byte-offset
+// tailer would skip them, and (b) seed tailer.resolved with already-seen
+// IDs so the tailer's read-from-zero default doesn't replay history.
+async function loadDecisions(worktreeName: string): Promise<DecisionsLoad> {
   const dir = statusDirForWorktree(worktreeName);
   const requestsFile = join(dir, "decision-requests.jsonl");
-  if (!existsSync(requestsFile)) return [];
+  const result: DecisionsLoad = {
+    pending: [],
+    answeredIds: new Set(),
+    allRequestIds: new Set(),
+  };
+  if (!existsSync(requestsFile)) return result;
 
   const requestsRaw = await readFile(requestsFile, "utf8");
   const allRequests: DecisionRequest[] = [];
   for (const line of requestsRaw.split("\n")) {
     if (!line.trim()) continue;
     try {
-      allRequests.push(JSON.parse(line) as DecisionRequest);
+      const req = JSON.parse(line) as DecisionRequest;
+      allRequests.push(req);
+      result.allRequestIds.add(req.request_id);
     } catch {
       // skip malformed
     }
   }
 
   const answersFile = join(dir, "decision-answers.jsonl");
-  const answeredIds = new Set<string>();
   if (existsSync(answersFile)) {
     const answersRaw = await readFile(answersFile, "utf8");
     for (const line of answersRaw.split("\n")) {
@@ -340,7 +357,7 @@ async function loadPendingDecisions(
       try {
         const parsed = JSON.parse(line) as { request_id?: string };
         if (typeof parsed.request_id === "string") {
-          answeredIds.add(parsed.request_id);
+          result.answeredIds.add(parsed.request_id);
         }
       } catch {
         // skip malformed
@@ -348,7 +365,10 @@ async function loadPendingDecisions(
     }
   }
 
-  return allRequests.filter((r) => !answeredIds.has(r.request_id));
+  result.pending = allRequests.filter(
+    (r) => !result.answeredIds.has(r.request_id),
+  );
+  return result;
 }
 
 async function readNewPermissionRequests(
@@ -1492,18 +1512,32 @@ export async function runDashboard(): Promise<void> {
   };
   const initialSnapshot = await snapshot(tailer);
 
-  // Surface any decisions that are pending from BEFORE the dashboard
-  // launched (snapshot's byte-offset tailer only catches NEW entries).
-  // For each worktree, find requests not yet answered.
+  // For each EXISTING worktree at startup:
+  //   1. Seed tailer.offsets to the current file size for the tailable
+  //      files. The tailer's default of 0 means "read from start" — that's
+  //      right for files that appear later, but wrong for files that were
+  //      already populated when the dashboard launched.
+  //   2. Load every existing decision request, surface pending ones, seed
+  //      resolved with both pending IDs (so the tailer-from-zero doesn't
+  //      double-add) and answered IDs (so historic answered requests
+  //      don't get replayed if the file is read fresh).
   const initialPendingDecisions: DecisionRequest[] = [];
   for (const row of initialSnapshot.rows) {
-    const pending = await loadPendingDecisions(row.entry.name);
-    initialPendingDecisions.push(...pending);
-    for (const req of pending) {
-      // Mark as already-handled-by-tailer so it doesn't fire again when
-      // the file grows past its current size.
-      tailer.resolved.add(req.request_id);
+    const dir = statusDirForWorktree(row.entry.name);
+    for (const fname of [
+      "decision-requests.jsonl",
+      "permission-requests.jsonl",
+    ]) {
+      const path = join(dir, fname);
+      if (existsSync(path)) {
+        const size = (await stat(path)).size;
+        tailer.offsets.set(`${row.entry.name}::${fname}`, size);
+      }
     }
+    const decs = await loadDecisions(row.entry.name);
+    initialPendingDecisions.push(...decs.pending);
+    for (const id of decs.allRequestIds) tailer.resolved.add(id);
+    for (const id of decs.answeredIds) tailer.resolved.add(id);
   }
 
   // Wrap the entire interactive lifecycle in an explicit Promise so that
