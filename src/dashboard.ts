@@ -589,16 +589,18 @@ function renderTable(opts: RenderOpts): string {
   const out: string[] = [];
   out.push(HOME);
 
-  // Status bar
+  // Status bar — always show the counts (including 0) so the user can
+  // tell at a glance whether the loaders/tailers are tracking anything.
   const totalPending = Array.from(pendingByWorktree.values()).reduce((a, b) => a + b, 0);
-  const pendingNote =
-    totalPending > 0
-      ? kleur.bold().yellow(` · ${totalPending} permission${totalPending === 1 ? "" : "s"} pending `)
-      : "";
-  const decisionNote =
-    opts.pendingDecisionCount > 0
-      ? kleur.bold().magenta(` · ${opts.pendingDecisionCount} decision${opts.pendingDecisionCount === 1 ? "" : "s"} pending `)
-      : "";
+  const pendingStyle = totalPending > 0 ? kleur.bold().yellow : kleur.dim;
+  const pendingNote = pendingStyle(
+    ` · ${totalPending} perm${totalPending === 1 ? "" : "s"} pending `,
+  );
+  const decisionStyle =
+    opts.pendingDecisionCount > 0 ? kleur.bold().magenta : kleur.dim;
+  const decisionNote = decisionStyle(
+    ` · ${opts.pendingDecisionCount} decision${opts.pendingDecisionCount === 1 ? "" : "s"} pending `,
+  );
   const linearNote = process.env.LINEAR_API_KEY
     ? kleur.dim(` · Linear: ${kleur.green("on")} `)
     : kleur.dim(` · Linear: ${kleur.red("off")} `);
