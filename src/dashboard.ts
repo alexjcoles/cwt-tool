@@ -1748,11 +1748,38 @@ export async function runDashboard(): Promise<void> {
       }
     : () => {};
 
+  // Heartbeat: write a one-line snapshot of every worktree's
+  // decision-requests.jsonl size + tracked offset every 30 seconds when
+  // CWT_DEBUG is set. Lets us see whether the file is growing without
+  // the tailer noticing.
+  let tickCount = 0;
+  const heartbeatLog = (): void => {
+    if (!process.env.CWT_DEBUG) return;
+    const fs = require("node:fs");
+    const parts: string[] = [];
+    for (const row of rows) {
+      const file = join(
+        statusDirForWorktree(row.entry.name),
+        "decision-requests.jsonl",
+      );
+      const size = fs.existsSync(file) ? fs.statSync(file).size : -1;
+      const off = tailer.offsets.get(`${row.entry.name}::decision-requests.jsonl`) ?? -1;
+      parts.push(`${row.entry.name.slice(0, 24)}=${size}/${off}`);
+    }
+    debugLog(
+      `heartbeat tick=${tickCount} mode=${mode.kind} q=${pendingDecisionQueue.length} ${parts.join(" ")}`,
+    );
+  };
+
   debugLog(
     `dashboard started: ${rows.length} worktrees, ${pendingDecisionQueue.length} pending decisions at startup`,
   );
 
   const tick = setInterval(async () => {
+    tickCount++;
+    // Heartbeat every 40 ticks (~30s) so we can verify ticks ARE firing
+    // and observe the file size vs tracked offset over time.
+    if (tickCount % 40 === 1) heartbeatLog();
     const result = await snapshot(tailer);
     rows = result.rows;
     lastDefaults = result.lastDefaults;
