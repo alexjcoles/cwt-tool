@@ -1706,6 +1706,26 @@ export async function runDashboard(): Promise<void> {
 
   redraw();
 
+  const debugLog = process.env.CWT_DEBUG
+    ? (msg: string) => {
+        const fs = require("node:fs");
+        const path = require("node:path");
+        try {
+          fs.appendFileSync(
+            path.join(process.env.HOME ?? "", ".cwt", "dashboard-debug.log"),
+            `${new Date().toISOString()} ${msg}\n`,
+            "utf8",
+          );
+        } catch {
+          // ignore
+        }
+      }
+    : () => {};
+
+  debugLog(
+    `dashboard started: ${rows.length} worktrees, ${pendingDecisionQueue.length} pending decisions at startup`,
+  );
+
   const tick = setInterval(async () => {
     const result = await snapshot(tailer);
     rows = result.rows;
@@ -1713,6 +1733,9 @@ export async function runDashboard(): Promise<void> {
     if (selected >= rows.length) selected = Math.max(0, rows.length - 1);
 
     if (result.newRequests.length > 0) {
+      debugLog(
+        `tick: +${result.newRequests.length} permission(s) ${JSON.stringify(result.newRequests.map((r) => r.request_id))}, mode=${mode.kind}`,
+      );
       for (const req of result.newRequests) {
         pendingQueue.push(req);
       }
@@ -1724,12 +1747,18 @@ export async function runDashboard(): Promise<void> {
       }
     }
     if (result.newDecisions.length > 0) {
+      debugLog(
+        `tick: +${result.newDecisions.length} decision(s) ${JSON.stringify(result.newDecisions.map((r) => r.request_id))}, mode=${mode.kind}`,
+      );
       for (const req of result.newDecisions) {
         pendingDecisionQueue.push(req);
       }
       if (mode.kind === "normal") {
         flash(`Decision needed from ${result.newDecisions[0]!.worktree}`);
         enterDecisionMode();
+        debugLog(`tick: auto-popped decision modal for ${result.newDecisions[0]!.request_id}`);
+      } else {
+        debugLog(`tick: NOT auto-popping (mode=${mode.kind}); queue is now ${pendingDecisionQueue.length}`);
       }
     }
     redraw();
