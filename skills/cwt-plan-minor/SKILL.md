@@ -140,9 +140,9 @@ await_decision(
 
 The call blocks until the user answers in the dashboard. The returned text is their response.
 
-Branch on the answer:
+Branch on the answer. Accept any of "approved", "approve", "yes", "y", "ok", "go", "lgtm", "ship it" (case-insensitive, trimmed) as approval — users type the obvious thing. Anything else is treated as feedback.
 
-- If the response normalises to "approved" (case-insensitive, trimmed): `report_status('working', 'Plan approved; chaining into /cwt-execute')` and **invoke `cwt-execute` automatically** via the Skill tool — the user has already approved, no second gate needed:
+- If approval: `report_status('working', 'Plan approved; chaining into /cwt-execute')` and **invoke `cwt-execute` automatically** via the Skill tool — the user has already approved, no second gate needed:
 
   ```
   Skill(skill="cwt-execute")

@@ -167,9 +167,9 @@ await_decision(
 )
 ```
 
-Branch on the answer:
+Branch on the answer. Accept any of "approved", "approve", "yes", "y", "ok", "go", "lgtm", "ship it" (case-insensitive, trimmed) as approval. Anything else is treated as a revision request.
 
-- "approved" (case-insensitive): proceed to Step 7.
+- Approval: proceed to Step 7.
 - Revision request: parse the user's adjustments, update the triage, present the revised summary via `await_decision` again.
 
 Do not proceed until the user confirms the (possibly revised) triage.
