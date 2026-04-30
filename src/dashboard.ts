@@ -581,6 +581,7 @@ interface RenderOpts {
   message: string | null;
   mode: Mode;
   pendingByWorktree: Map<string, number>;
+  pendingDecisionCount: number;
 }
 
 function renderTable(opts: RenderOpts): string {
@@ -592,7 +593,11 @@ function renderTable(opts: RenderOpts): string {
   const totalPending = Array.from(pendingByWorktree.values()).reduce((a, b) => a + b, 0);
   const pendingNote =
     totalPending > 0
-      ? kleur.bold().yellow(` · ${totalPending} pending permission${totalPending === 1 ? "" : "s"} `)
+      ? kleur.bold().yellow(` · ${totalPending} permission${totalPending === 1 ? "" : "s"} pending `)
+      : "";
+  const decisionNote =
+    opts.pendingDecisionCount > 0
+      ? kleur.bold().magenta(` · ${opts.pendingDecisionCount} decision${opts.pendingDecisionCount === 1 ? "" : "s"} pending `)
       : "";
   const linearNote = process.env.LINEAR_API_KEY
     ? kleur.dim(` · Linear: ${kleur.green("on")} `)
@@ -600,7 +605,7 @@ function renderTable(opts: RenderOpts): string {
   const title =
     kleur.bold().bgBlue().white(
       ` cwt dashboard — ${rows.length} worktree${rows.length === 1 ? "" : "s"} `,
-    ) + pendingNote + linearNote;
+    ) + pendingNote + decisionNote + linearNote;
   out.push(title + CLEAR_LINE + "\n");
 
   // Table header
@@ -1647,6 +1652,7 @@ export async function runDashboard(): Promise<void> {
         message,
         mode,
         pendingByWorktree,
+        pendingDecisionCount: pendingDecisionQueue.length,
       });
     if (mode.kind === "permission") {
       out += renderPermissionModal(mode.req, cols, termRows);
