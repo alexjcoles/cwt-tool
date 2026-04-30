@@ -298,8 +298,13 @@ async function readNewLines<T extends { request_id: string }>(
     state.offsets.set(key, size);
     return [];
   }
-  const raw = await readFile(file, "utf8");
-  const newSlice = raw.slice(prev);
+  // Read as Buffer (bytes) and slice by byte offset, then decode to UTF-8.
+  // String slicing operates on UTF-16 code units, which doesn't match the
+  // byte count returned by stat() when the file contains multi-byte UTF-8
+  // characters (em-dashes, arrows, emoji). Slicing the string by a byte
+  // offset overshoots the end and silently drops appended lines.
+  const buf = await readFile(file);
+  const newSlice = buf.subarray(prev).toString("utf8");
   state.offsets.set(key, size);
   const out: T[] = [];
   for (const line of newSlice.split("\n")) {
