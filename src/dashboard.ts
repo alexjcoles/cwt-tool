@@ -1557,6 +1557,10 @@ export async function runDashboard(): Promise<void> {
   const pendingQueue: PermissionRequest[] = [];
   const pendingDecisionQueue: DecisionRequest[] = [];
   const pendingByWorktree = new Map<string, number>();
+  // request_ids the user has explicitly ESC'd from a modal; auto-pop skips
+  // these but 'd' / 'p' can force-open them again.
+  const dismissedDecisionIds = new Set<string>();
+  const dismissedPermissionIds = new Set<string>();
   let mode: Mode = { kind: "normal" };
 
   let selected = 0;
@@ -1626,21 +1630,43 @@ export async function runDashboard(): Promise<void> {
     }
   };
 
-  const enterPermissionMode = (): void => {
+  // `force` ignores the dismissed set — used by 'p' / 'd' so the user can
+  // re-open something they ESC'd. Non-force is the auto-pop path: pops the
+  // first non-dismissed item.
+  const enterPermissionMode = (force = false): void => {
     if (pendingQueue.length === 0) return;
     if (mode.kind !== "normal") return;
-    const req = pendingQueue[0]!;
+    const req = force
+      ? pendingQueue[0]
+      : pendingQueue.find((r) => !dismissedPermissionIds.has(r.request_id));
+    if (!req) return;
     mode = { kind: "permission", req };
   };
 
-  const enterDecisionMode = (): void => {
+  const enterDecisionMode = (force = false): void => {
     if (pendingDecisionQueue.length === 0) return;
     if (mode.kind !== "normal") return;
-    const req = pendingDecisionQueue[0]!;
+    const req = force
+      ? pendingDecisionQueue[0]
+      : pendingDecisionQueue.find((r) => !dismissedDecisionIds.has(r.request_id));
+    if (!req) return;
     mode = { kind: "decision", req, buffer: "" };
   };
 
   const redraw = (): void => {
+    // Before rendering, see if there's a pending modal-eligible item and
+    // auto-pop the relevant modal. This makes EVERY transition back to
+    // normal mode (close plan view, exit message input, ESC out of bash,
+    // etc.) re-check the queues — without this the modal would only
+    // pop on the original arrival tick and could be missed.
+    if (mode.kind === "normal") {
+      if (pendingDecisionQueue.length > 0) {
+        enterDecisionMode();
+      }
+      if (mode.kind === "normal" && pendingQueue.length > 0) {
+        enterPermissionMode();
+      }
+    }
     const cols = process.stdout.columns ?? 120;
     const termRows = process.stdout.rows ?? 30;
     if (Date.now() > messageExpiresAt) message = null;
@@ -1853,10 +1879,13 @@ export async function runDashboard(): Promise<void> {
         })();
         return;
       } else if (chunk === "\x1b") {
-        // ESC dismisses without answering — claude is still blocked. The
-        // request stays in the queue so user can re-open via 'd'.
+        // ESC dismisses without answering. The request stays in the queue
+        // and claude is still blocked — but we mark it dismissed so the
+        // auto-pop path won't keep re-showing it. Press 'd' to force-open
+        // the same one again.
+        dismissedDecisionIds.add(mode.req.request_id);
         mode = { kind: "normal" };
-        flash("Dismissed (decision still pending in claude)");
+        flash("Dismissed (press 'd' to re-open)");
         redraw();
       } else if (chunk === "\x7f" || chunk === "\b") {
         mode = { ...mode, buffer: mode.buffer.slice(0, -1) };
@@ -2288,19 +2317,23 @@ export async function runDashboard(): Promise<void> {
         }
       })();
     } else if (chunk === "p") {
-      // Manually open the permission modal for the next pending request
+      // Force-open the next permission modal (ignores dismissed set).
       if (pendingQueue.length === 0) {
         flash("No pending permission requests");
       } else {
-        enterPermissionMode();
+        // Clear dismissed so this one re-opens
+        if (pendingQueue[0]) dismissedPermissionIds.delete(pendingQueue[0].request_id);
+        enterPermissionMode(true);
       }
       redraw();
     } else if (chunk === "d") {
-      // Manually open the decision modal for the next pending decision
+      // Force-open the next decision modal (ignores dismissed set).
       if (pendingDecisionQueue.length === 0) {
         flash("No pending decisions");
       } else {
-        enterDecisionMode();
+        if (pendingDecisionQueue[0])
+          dismissedDecisionIds.delete(pendingDecisionQueue[0].request_id);
+        enterDecisionMode(true);
       }
       redraw();
     }
