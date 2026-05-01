@@ -225,9 +225,32 @@ For each DEFER:
 - If the user approved creating a Linear issue: tell them to run the project's `/create-issue` skill (cwt does not currently auto-create issues).
 - Otherwise: add a `TODO:: [DEFERRED]` comment at the relevant location with the full header (what / Reason / Scope / Java ref / See).
 
-## Step 10: Draft replies (requires confirmation)
+If the DEFER created changes (TODO comment), commit them now alongside or after the fix commit. Don't leave the working tree dirty going into the push step.
 
-Read `docs/templates/pr-review-reply.md` (if present) for the project's reply format. Draft a reply for each finding using FIX/LEAVE/DEFER templates.
+## Step 10: Push the branch
+
+`report_status('working', 'Pushing review-pass commits before posting replies')`.
+
+The reply step that follows posts comments like "fixed in commit abc123" — those commits MUST be visible on the PR before the replies, otherwise reviewers click through to a commit that doesn't exist remotely yet. Push first.
+
+```bash
+# Confirm clean tree first — every fix should have been committed in steps 7-9.
+git status --short
+git push origin "$(git branch --show-current)"
+```
+
+If `git status --short` shows uncommitted changes, stop — `report_status('blocked', 'Uncommitted changes after FIX/DEFER apply; commit them before push')`. Don't try to push partial work.
+
+If the diff includes UI files (same regex as `/cwt-agent-view`), also force-push the temp ref so manual UI review is up to date:
+
+```bash
+git diff --name-only main..HEAD | grep -E '^(app/views/|app/components/|app/javascript/|app/assets/|config/tailwind|tailwind\.config|app/helpers/)' | head -1 \
+  && git push --force origin HEAD:"temp/$(echo AMPHTT-NNN | tr A-Z a-z)"
+```
+
+## Step 11: Draft + post replies (requires confirmation)
+
+Now that the fixes are visible on the PR, draft replies. Read `docs/templates/pr-review-reply.md` (if present) for the project's reply format. Use FIX/LEAVE/DEFER templates.
 
 **Do not reply to**: architectural review summaries where everything passed, informational comments, walkthrough summaries.
 
@@ -236,14 +259,14 @@ Show all draft replies in one block to the chat (transcript is the record), then
 ```
 await_decision(
   question="<N> draft replies ready (see above).\n" +
-           "Reply 'post' to send them all, or 'skip' to apply code changes " +
-           "without posting.",
+           "Push is done — fixes are on the PR.\n" +
+           "Reply 'post' to send replies, or 'skip' to leave them undrafted.",
   options=["post", "skip"]
 )
 ```
 
 If "post": continue to the gh api calls below.
-If "skip" or anything else: skip posting; the code changes and plan amendments still stand.
+If "skip" or anything else: skip posting; the code changes and push still stand.
 
 When posting:
 
@@ -259,16 +282,16 @@ When posting:
   gh api repos/{owner}/{repo}/issues/{PR}/comments -f body="@<reviewer> <reply>"
   ```
 
-If the user declines posting, skip this step — the code changes and plan amendments still stand.
+## Step 12: Report
 
-## Step 11: Report
-
-`report_status('done', '<N> findings triaged; <N> fixes applied; <N> deferrals')`.
+`report_status('done', '<N> findings triaged; <N> fixes applied; pushed; <N> replies posted')`.
 
 Summarise in chat:
 - Findings triaged (N fix / N leave / N defer)
 - Files modified
 - Plan amendments added
-- Reminder: review changes locally, then `git push` to trigger another CI pass
+- Pushed: yes (CI will run again)
+- Replies posted: yes/no (and how many)
+- Reminder: wait for CI, decide whether to merge
 
-**Do NOT push or merge.** The user pushes when ready, the CI pass runs again, and they decide whether to merge.
+**Do NOT merge.** Merging is the user's call after they verify the new CI run.
