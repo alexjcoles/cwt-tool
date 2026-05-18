@@ -2254,7 +2254,17 @@ export async function runDashboard(): Promise<void> {
           kleur.dim(`  detach with ${kleur.bold("Ctrl+B  D")} (session keeps running)\n`) +
           kleur.dim(`  exit shell with ${kleur.bold("Ctrl+D")} or ${kleur.bold("exit")}\n\n`),
       );
+      const composeFileAbs = join(
+        target.entry.worktreePath,
+        ".cwt",
+        "docker-compose.yml",
+      );
+      const service = target.entry.serviceName ?? "app";
       const { spawnSync } = require("node:child_process");
+      // Self-heal the container in case a system restart wiped tmux /
+      // claude / the .claude.json symlink (postStartCommand only fires
+      // on devcontainer up, not bare docker compose up). Same chain as
+      // worktree.attach uses. Idempotent — no-op when healthy.
       spawnSync(
         "docker",
         [
@@ -2262,9 +2272,31 @@ export async function runDashboard(): Promise<void> {
           "-p",
           target.entry.composeProject,
           "-f",
-          join(target.entry.worktreePath, ".cwt", "docker-compose.yml"),
+          composeFileAbs,
           "exec",
-          target.entry.serviceName ?? "app",
+          "-T",
+          service,
+          "bash",
+          "-c",
+          [
+            "sudo chown -R vscode:vscode /home/vscode/.claude /home/vscode/.config/gh 2>/dev/null || true",
+            "command -v tmux >/dev/null 2>&1 || (sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends tmux >/dev/null 2>&1) || true",
+            "test -x /home/vscode/.local/bin/claude || curl -fsSL https://claude.ai/install.sh | bash >/dev/null 2>&1 || true",
+            "if [ ! -L /home/vscode/.claude.json ]; then if [ -f /home/vscode/.claude/.claude.json ]; then rm -f /home/vscode/.claude.json; ln -sf /home/vscode/.claude/.claude.json /home/vscode/.claude.json; elif [ -f /home/vscode/.claude.json ]; then mv /home/vscode/.claude.json /home/vscode/.claude/.claude.json && ln -sf /home/vscode/.claude/.claude.json /home/vscode/.claude.json; fi; fi",
+          ].join("; "),
+        ],
+        { stdio: "inherit" },
+      );
+      spawnSync(
+        "docker",
+        [
+          "compose",
+          "-p",
+          target.entry.composeProject,
+          "-f",
+          composeFileAbs,
+          "exec",
+          service,
           "tmux",
           "new-session",
           "-A",
