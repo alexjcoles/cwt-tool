@@ -12,6 +12,11 @@ services:
       dockerfile: <%= it.dockerfile %>
     image: <%= it.composeProject %>-app
     container_name: <%= it.composeProject %>-app
+    # Auto-restart on docker daemon / host reboot so worktrees survive a
+    # shutdown without a manual `cwt up`. `unless-stopped` won't restart
+    # the container if the user explicitly `docker stop`'d it, only if
+    # it crashed or the daemon was restarted (e.g. system reboot).
+    restart: unless-stopped
     working_dir: /workspaces/<%= it.worktreeName %>
     volumes:
       - <%= it.worktreePath %>:/workspaces/<%= it.worktreeName %>:cached
