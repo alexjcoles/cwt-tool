@@ -431,6 +431,34 @@ export async function execCommand(name: string, command: string): Promise<number
   return result.status ?? 1;
 }
 
+// Container fixups that devcontainer CLI's postStartCommand would run on a
+// fresh up, but that don't fire when the container is brought back up via
+// bare `docker compose up` (e.g. after a system reboot). cwt attach calls
+// this every time to self-heal — all checks are guarded so this is a
+// no-op when everything is already in place.
+async function ensureContainerFixups(opts: {
+  projectName: string;
+  composeFile: string;
+  service: string;
+}): Promise<void> {
+  const fixup = [
+    // Volume ownership (docker creates named volumes root-owned)
+    "sudo chown -R vscode:vscode /home/vscode/.claude /home/vscode/.config/gh 2>/dev/null || true",
+    // tmux — cwt attach needs it
+    "command -v tmux >/dev/null 2>&1 || (sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends tmux >/dev/null 2>&1) || true",
+    // claude binary — sometimes postCreate didn't finish
+    "test -x /home/vscode/.local/bin/claude || curl -fsSL https://claude.ai/install.sh | bash >/dev/null 2>&1 || true",
+    // .claude.json symlink into the shared volume (auth carries across containers)
+    "if [ ! -L /home/vscode/.claude.json ]; then if [ -f /home/vscode/.claude/.claude.json ]; then rm -f /home/vscode/.claude.json; ln -sf /home/vscode/.claude/.claude.json /home/vscode/.claude.json; elif [ -f /home/vscode/.claude.json ]; then mv /home/vscode/.claude.json /home/vscode/.claude/.claude.json && ln -sf /home/vscode/.claude/.claude.json /home/vscode/.claude.json; fi; fi",
+  ].join("; ");
+  await compose.exec({
+    projectName: opts.projectName,
+    composeFile: opts.composeFile,
+    service: opts.service,
+    command: ["bash", "-c", fixup],
+  });
+}
+
 export async function attach(name: string): Promise<void> {
   validateName(name);
   const state = new State();
@@ -441,6 +469,18 @@ export async function attach(name: string): Promise<void> {
   const composeFile = composeFilePath(entry.worktreePath);
   // Older state entries (pre-serviceName field) default to "app".
   const service = entry.serviceName ?? "app";
+
+  // Self-heal the container if a system restart wiped tmux / symlinks
+  // (postStartCommand only fires on devcontainer up, not bare docker
+  // compose up). Cheap and idempotent so we run unconditionally.
+  await ensureContainerFixups({
+    projectName: entry.composeProject,
+    composeFile,
+    service,
+  }).catch((e) => {
+    log.warn(`Container fixup failed: ${(e as Error).message}; attach may fail if tmux is missing`);
+  });
+
   log.info(`Attaching to ${name}`);
   log.dim(`  detach: Ctrl+B  D   (session keeps running, re-attach later)`);
   log.dim(`  exit:   Ctrl+D or 'exit'   (closes the shell)`);
