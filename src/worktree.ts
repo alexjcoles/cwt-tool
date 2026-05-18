@@ -383,6 +383,19 @@ export async function destroy(name: string): Promise<void> {
     }
   }
 
+  // Remove the per-worktree app image. `compose down -v` does NOT remove the
+  // image — only containers + volumes. Without this each worktree leaves a
+  // ~4GB image behind on every cwt rm.
+  const imageName = `${entry.composeProject}-app`;
+  const imgRm = await run(["docker", "image", "rm", imageName], { quiet: true });
+  if (imgRm.exitCode === 0) {
+    log.info(`Removed image ${imageName}`);
+  } else if (imgRm.stderr.includes("No such image")) {
+    // already gone — fine
+  } else {
+    log.warn(`Could not remove image ${imageName}: ${imgRm.stderr.trim()}`);
+  }
+
   if (existsSync(entry.worktreePath)) {
     log.info(`Removing git worktree at ${entry.worktreePath}`);
     const cwd = entry.repoRoot ?? (await getRepoRoot(entry.worktreePath).catch(() => process.cwd()));
@@ -398,6 +411,73 @@ export async function destroy(name: string): Promise<void> {
 
   await state.removeWorktree(name);
   log.success(`Removed worktree ${name}`);
+}
+
+// Find docker resources that look cwt-managed but don't correspond to any
+// tracked worktree, and remove them. Useful after we discovered the image-
+// leak bug — earlier cwt rm runs left ~4GB images behind per worktree.
+export interface PruneResult {
+  removedImages: string[];
+  removedContainers: string[];
+  failed: Array<{ resource: string; reason: string }>;
+}
+
+export async function prune(): Promise<PruneResult> {
+  const state = new State();
+  const entries = await state.listWorktrees();
+  const tracked = new Set(entries.map((e) => e.composeProject));
+  const result: PruneResult = {
+    removedImages: [],
+    removedContainers: [],
+    failed: [],
+  };
+
+  // Orphan containers: matching cwt-* prefix but not in any tracked compose project
+  const psOut = await run(
+    ["docker", "ps", "-a", "--format", "{{.Names}}|{{.Status}}"],
+    { quiet: true },
+  );
+  if (psOut.exitCode === 0) {
+    for (const line of psOut.stdout.split("\n")) {
+      if (!line.trim()) continue;
+      const [name] = line.split("|");
+      if (!name?.startsWith("cwt-")) continue;
+      // name format: cwt-<worktree>-<service>; project = cwt-<worktree>
+      const m = /^(cwt-.+)-(app|pg|selenium)$/.exec(name);
+      if (!m) continue;
+      const project = m[1]!;
+      if (tracked.has(project)) continue;
+      const rm = await run(["docker", "rm", "-f", name], { quiet: true });
+      if (rm.exitCode === 0) {
+        result.removedContainers.push(name);
+      } else {
+        result.failed.push({ resource: `container ${name}`, reason: rm.stderr.trim() });
+      }
+    }
+  }
+
+  // Orphan images: cwt-<worktree>-app where no tracked worktree uses that name
+  const imgOut = await run(
+    ["docker", "images", "--filter", "reference=cwt-*", "--format", "{{.Repository}}"],
+    { quiet: true },
+  );
+  if (imgOut.exitCode === 0) {
+    const trackedImages = new Set(
+      entries.map((e) => `${e.composeProject}-app`),
+    );
+    for (const repo of imgOut.stdout.split("\n")) {
+      if (!repo.trim()) continue;
+      if (trackedImages.has(repo)) continue;
+      const rm = await run(["docker", "image", "rm", repo], { quiet: true });
+      if (rm.exitCode === 0) {
+        result.removedImages.push(repo);
+      } else if (!rm.stderr.includes("No such image")) {
+        result.failed.push({ resource: `image ${repo}`, reason: rm.stderr.trim() });
+      }
+    }
+  }
+
+  return result;
 }
 
 export async function execCommand(name: string, command: string): Promise<number> {

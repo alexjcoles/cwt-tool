@@ -159,6 +159,38 @@ export function buildProgram(): Command {
     });
 
   program
+    .command("prune")
+    .description("Remove docker containers + images for worktrees no longer tracked in cwt state")
+    .action(async () => {
+      try {
+        log.info("Scanning for orphaned cwt containers and images...");
+        const result = await worktree.prune();
+        if (result.removedContainers.length > 0) {
+          log.success(`Removed ${result.removedContainers.length} orphan container(s):`);
+          for (const c of result.removedContainers) log.dim(`  ${c}`);
+        }
+        if (result.removedImages.length > 0) {
+          log.success(`Removed ${result.removedImages.length} orphan image(s) (~4GB each):`);
+          for (const i of result.removedImages) log.dim(`  ${i}`);
+        }
+        if (result.failed.length > 0) {
+          log.warn(`${result.failed.length} resource(s) could not be removed:`);
+          for (const f of result.failed) log.dim(`  ${f.resource}: ${f.reason}`);
+        }
+        if (
+          result.removedContainers.length === 0 &&
+          result.removedImages.length === 0 &&
+          result.failed.length === 0
+        ) {
+          log.info("Nothing to prune.");
+        }
+      } catch (e) {
+        log.error((e as Error).message);
+        process.exit(1);
+      }
+    });
+
+  program
     .command("status")
     .description("Show what each Claude is reporting via the cwt-channel server")
     .action(async () => {
