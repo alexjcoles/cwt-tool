@@ -130,7 +130,16 @@ git log --oneline main..HEAD             # commits should match plan's Commit St
 git status --short                        # should be clean
 bin/run-tests.sh --core 2>&1 | tail -5    # all tests green
 bin/rubocop 2>&1 | tail -3                # rubocop clean
+bin/check-ps-classes 2>&1 | tail -20      # every .ps-* used in views is defined in CSS
 ```
+
+`bin/check-ps-classes` catches the common UI bug where an ERB template references a `.ps-foo` class that was never added to `app/assets/tailwind/application.css`. If it fails:
+
+- Add the missing class definitions to `app/assets/tailwind/application.css` (following `docs/ui/norman-y/STYLE_GUIDE.md`).
+- Amend the most recent UI-touching commit (`git commit --amend --no-edit` after staging the CSS) rather than tacking on a separate "add missing styles" commit — the class and its definition belong together.
+- Re-run `bin/check-ps-classes` until it passes.
+
+If `bin/check-ps-classes` doesn't exist in the worktree, skip this step and `note` the absence — it lives on the patentsafe-ai main branch; older worktrees forked before it landed won't have it.
 
 `report_status('working', 'Implementation complete; chaining into peer review')` and `note` the commit count and any new files added.
 

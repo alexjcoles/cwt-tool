@@ -44,6 +44,7 @@ Read in one batch:
 - `docs/templates/minor-plan.md`
 - `docs/linear-context.md`
 - `CLAUDE.md` (full file — Plan Directions, Java Alignment, Feature Implementations sections in particular)
+- **If the issue touches the UI** (views, forms, pages, wizards, layouts, navigation, components — anything that ends up rendered in a browser), also read `docs/ui/norman-y/STYLE_GUIDE.md`. The repo uses Tailwind utility classes plus a custom `.ps-*` namespace defined in `app/assets/tailwind/application.css`. Every `.ps-*` class you reference in an ERB template MUST exist in that stylesheet — there are no separate component CSS files. New classes are added to `application.css` as part of the same commit that introduces them in the view.
 
 `note` any project-specific constraints you find that aren't already obvious from the issue (e.g. "Java alignment is required even when N/A").
 
@@ -100,6 +101,8 @@ Required sections (compliance failure if any are omitted):
 - `## Amendments` — heading present, body empty (filled during execute / review-pr)
 
 Use ASCII diagrams for spatial things (UI, request flow), tables for before/after and Java-vs-Rails comparison. Show, don't just tell.
+
+**For UI deliverables**: list every new `.ps-*` class you intend to introduce alongside the view it appears in, and mark them as needing definitions in `app/assets/tailwind/application.css`. Prefer reusing existing classes (grep `app/assets/tailwind/application.css` for the namespace, e.g. `\.ps-admin-`, `\.ps-form__`, `\.ps-table__`) — invent new ones only when nothing fits.
 
 ## Step 9: Update plans README
 

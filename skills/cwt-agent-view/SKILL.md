@@ -155,9 +155,12 @@ Run final checks:
 ```bash
 bin/run-tests.sh --core 2>&1 | tail -5
 bin/rubocop 2>&1 | tail -3
+test -x bin/check-ps-classes && bin/check-ps-classes 2>&1 | tail -20
 ```
 
-If either fails, do NOT push. `report_status('blocked', 'Final checks failed: <one-line>')` and stop. The user investigates.
+If any of these fail, do NOT push. `report_status('blocked', 'Final checks failed: <one-line>')` and stop. The user investigates.
+
+For `bin/check-ps-classes` specifically: undefined `.ps-*` classes mean a view references styling that doesn't exist. Fix path is to add the definitions to `app/assets/tailwind/application.css` (see `docs/ui/norman-y/STYLE_GUIDE.md`) and amend the most recent UI-touching commit, then re-run. Do not push past this check by adding the class to the whitelist unless you've verified the class genuinely comes from elsewhere (parent stylesheet, dynamic name).
 
 If both clean, push:
 
