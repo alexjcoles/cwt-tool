@@ -165,12 +165,30 @@ export async function create(opts: CreateOptions): Promise<WorktreeEntry> {
 
   await ensureDir(worktreeRootForRepo(repoRoot));
 
+  // Fetch origin so we branch from the actual current tip, not whatever
+  // local refs happen to be — local `main` is often stale because the
+  // user works mostly in worktrees and rarely pulls the source repo.
+  // Without this, `git worktree add ... main` forks from a stale commit
+  // and the new branch is born behind origin.
+  log.info("Fetching origin (so the new branch starts from up-to-date refs)...");
+  const fetched = await run(["git", "fetch", "origin", "--prune"], {
+    cwd: repoRoot,
+    quiet: true,
+  });
+  if (fetched.exitCode !== 0) {
+    log.warn(`git fetch failed — proceeding with local refs:\n${fetched.stderr.trim()}`);
+  }
+
   const branchExists = await run(
     ["git", "show-ref", "--verify", `refs/heads/${branch}`],
     { cwd: repoRoot, quiet: true },
   );
   const remoteBranchExists = await run(
     ["git", "show-ref", "--verify", `refs/remotes/origin/${branch}`],
+    { cwd: repoRoot, quiet: true },
+  );
+  const remoteBaseExists = await run(
+    ["git", "show-ref", "--verify", `refs/remotes/origin/${baseBranch}`],
     { cwd: repoRoot, quiet: true },
   );
 
@@ -184,8 +202,13 @@ export async function create(opts: CreateOptions): Promise<WorktreeEntry> {
       { cwd: repoRoot },
     );
   } else {
+    // Prefer origin/<base> over local <base>: local can be days/weeks behind.
+    // Falls back to local only if origin doesn't have it (rare — would mean
+    // an unpushed default branch).
+    const startPoint = remoteBaseExists.exitCode === 0 ? `origin/${baseBranch}` : baseBranch;
+    log.info(`Forking new branch from ${startPoint}`);
     await runOrThrow(
-      ["git", "worktree", "add", "-b", branch, wtPath, baseBranch],
+      ["git", "worktree", "add", "-b", branch, wtPath, startPoint],
       { cwd: repoRoot },
     );
   }
