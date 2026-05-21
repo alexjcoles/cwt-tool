@@ -403,17 +403,13 @@ export async function create(opts: CreateOptions): Promise<WorktreeEntry> {
   return entry;
 }
 
-export async function destroy(name: string): Promise<void> {
-  validateName(name);
-  const state = new State();
-  const entry = await state.findWorktree(name);
-  if (!entry) {
-    throw new Error(`Worktree "${name}" not found`);
-  }
-
+// Tear down docker + filesystem resources for an entry. Pure: no state.json
+// access. Safe to run in a detached child process after the parent has already
+// removed the entry from state.
+export async function destroyResources(entry: WorktreeEntry): Promise<void> {
   const composeFile = composeFilePath(entry.worktreePath);
   if (existsSync(composeFile)) {
-    log.info(`Stopping containers for ${name}`);
+    log.info(`Stopping containers for ${entry.name}`);
     try {
       await compose.down({
         projectName: entry.composeProject,
@@ -450,8 +446,72 @@ export async function destroy(name: string): Promise<void> {
     }
   }
 
+  // Status dir last — it's where the teardown log lives, so wait until after
+  // every other step that might log a warning. Best-effort.
+  try {
+    const dir = statusDirForWorktree(entry.name);
+    if (existsSync(dir)) await rm(dir, { recursive: true, force: true });
+  } catch {
+    // best-effort
+  }
+}
+
+export async function destroy(name: string): Promise<void> {
+  validateName(name);
+  const state = new State();
+  const entry = await state.findWorktree(name);
+  if (!entry) {
+    throw new Error(`Worktree "${name}" not found`);
+  }
+  await destroyResources(entry);
   await state.removeWorktree(name);
   log.success(`Removed worktree ${name}`);
+}
+
+// Same teardown, but the slow docker work runs in a detached child process.
+// The state entry is removed synchronously before returning, so the caller
+// (CLI / dashboard) sees the worktree disappear from the list immediately
+// while compose down + image rm continue independently.
+//
+// The child's stdout/stderr is appended to a timestamped log under
+// ~/.cwt/teardown-logs/ so failures aren't silently swallowed.
+export async function destroyInBackground(name: string): Promise<{ logPath: string; pid: number }> {
+  validateName(name);
+  const state = new State();
+  const entry = await state.findWorktree(name);
+  if (!entry) {
+    throw new Error(`Worktree "${name}" not found`);
+  }
+  // Pull from state first so the dashboard's next redraw doesn't list it.
+  await state.removeWorktree(name);
+
+  const fs = await import("node:fs/promises");
+  const { spawn } = await import("node:child_process");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const logDir = path.join(os.homedir(), ".cwt", "teardown-logs");
+  await fs.mkdir(logDir, { recursive: true });
+  const ts = new Date().toISOString().replace(/[:.]/g, "-");
+  const logPath = path.join(logDir, `${name}-${ts}.log`);
+  const logFd = await fs.open(logPath, "a");
+
+  // Find this package's CLI entry. bin/cwt is the Bun-shebang script that
+  // dispatches subcommands; we invoke it with `_teardown <json>` so the
+  // child runs `destroyResources` against the entry passed in.
+  const cliEntry = path.resolve(import.meta.dir, "..", "bin", "cwt");
+
+  const child = spawn(
+    process.execPath,
+    [cliEntry, "_teardown", JSON.stringify(entry)],
+    {
+      detached: true,
+      stdio: ["ignore", logFd.fd, logFd.fd],
+      cwd: "/",
+    },
+  );
+  child.unref();
+  await logFd.close();
+  return { logPath, pid: child.pid ?? -1 };
 }
 
 // Find docker resources that look cwt-managed but don't correspond to any

@@ -2137,15 +2137,22 @@ export async function runDashboard(): Promise<void> {
     if (mode.kind === "remove_confirm") {
       if (chunk === "y" || chunk === "Y") {
         const entry = mode.entry;
-        clearInterval(tick);
-        cleanup();
-        process.stdout.write(
-          "\n" +
-            kleur.bold().red("→ removing worktree\n") +
-            kleur.dim(`  name:   ${entry.name}\n`) +
-            kleur.dim(`  branch: ${entry.branch}\n\n`),
-        );
-        void runRemoveFlow(entry.name);
+        // Detached teardown: state.json is updated synchronously so the
+        // table drops the row on the next tick (~750ms). compose down +
+        // image rm + git worktree remove continue in a child process.
+        // The user stays in the dashboard.
+        void (async () => {
+          try {
+            const { destroyInBackground } = await import("./worktree.ts");
+            const { logPath } = await destroyInBackground(entry.name);
+            flash(`Removing ${entry.name} in background · ${logPath}`);
+          } catch (e) {
+            flash(`Remove failed: ${(e as Error).message}`);
+          }
+          redraw();
+        })();
+        mode = { kind: "normal" };
+        redraw();
         return;
       } else if (chunk === "n" || chunk === "N" || chunk === "\x1b") {
         mode = { kind: "normal" };

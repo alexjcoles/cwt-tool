@@ -149,9 +149,34 @@ export function buildProgram(): Command {
     .command("rm")
     .description("Remove a worktree and tear down its container")
     .argument("<name>", "worktree name")
-    .action(async (name: string) => {
+    .option("-b, --background", "run teardown (compose down + image rm + git worktree remove) in a detached child process so the CLI returns immediately")
+    .action(async (name: string, opts: { background?: boolean }) => {
       try {
-        await worktree.destroy(name);
+        if (opts.background) {
+          const { logPath, pid } = await worktree.destroyInBackground(name);
+          log.success(`Detached teardown started (pid ${pid})`);
+          log.dim(`  log: ${logPath}`);
+          log.dim(`  tail -f "${logPath}"`);
+        } else {
+          await worktree.destroy(name);
+        }
+      } catch (e) {
+        log.error((e as Error).message);
+        process.exit(1);
+      }
+    });
+
+  // Internal: invoked by destroyInBackground in a detached child to do the
+  // actual docker + git teardown. Not user-facing. Takes the WorktreeEntry
+  // JSON as a single positional arg so the child doesn't need to read state.
+  program
+    .command("_teardown", { hidden: true })
+    .argument("<entry-json>")
+    .action(async (entryJson: string) => {
+      try {
+        const entry = JSON.parse(entryJson);
+        await worktree.destroyResources(entry);
+        log.success(`Teardown complete for ${entry.name}`);
       } catch (e) {
         log.error((e as Error).message);
         process.exit(1);
