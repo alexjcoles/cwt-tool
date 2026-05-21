@@ -276,9 +276,27 @@ export async function create(opts: CreateOptions): Promise<WorktreeEntry> {
   }
 
   const serviceName = opts.serviceName ?? "app";
-  const dataMount = opts.dataMount ?? null;
-  if (dataMount && !existsSync(dataMount)) {
-    throw new Error(`--data path does not exist: ${dataMount}`);
+  // Resolve the documents-repository host path. Two accepted forms:
+  //   1. `--data /path/to/storage`        — parent dir, with a `repository/`
+  //      subdir alongside `search_index/`. We bind only the `repository/`
+  //      subdir so each worktree keeps its own search index inside its own
+  //      filesystem (avoids Tantivy schema collisions across worktrees on
+  //      different branches).
+  //   2. `--data /path/to/storage/repository` — points straight at the
+  //      documents dir. Mounted as-is.
+  // Either way the in-container target is `storage/repository` so the app's
+  // PATENTSAFE_DATA_ROOT (storage/repository) resolves to real documents and
+  // `storage/search_index/` stays inside the worktree's own filesystem.
+  let dataMount = opts.dataMount ?? null;
+  if (dataMount) {
+    if (!existsSync(dataMount)) {
+      throw new Error(`--data path does not exist: ${dataMount}`);
+    }
+    const repoSubdir = join(dataMount, "repository");
+    if (existsSync(repoSubdir)) {
+      log.info(`--data: using ${repoSubdir} (mounting only repository/, not search_index/)`);
+      dataMount = repoSubdir;
+    }
   }
 
   const javaRef = opts.javaRef ?? autoDetectJavaRef(repoRoot);

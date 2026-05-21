@@ -38,7 +38,12 @@ services:
       # cwt logs, and the future dashboard can read what each Claude reports.
       - <%= it.statusDir %>:/var/cwt/<%= it.worktreeName %>:cached
 <% if (it.dataMount) { %>
-      - <%= it.dataMount %>:/workspaces/<%= it.worktreeName %>/storage:cached
+      # Mount only the documents (storage/repository), not the entire
+      # storage/ dir. Each worktree keeps its own storage/search_index/
+      # inside its filesystem so Tantivy schema differences between
+      # branches don't collide. PATENTSAFE_DATA_ROOT (set above) points
+      # at storage/repository, so the app reads documents from this mount.
+      - <%= it.dataMount %>:/workspaces/<%= it.worktreeName %>/storage/repository:cached
 <% } %>
 <% if (it.javaRef) { %>
       # Original Java PatentSafe codebase, read-only — used by cwt-java-explore

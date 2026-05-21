@@ -34,7 +34,7 @@ export function buildProgram(): Command {
     .option("--base <branch>", "base branch to fork from (defaults to main/master)")
     .option("-r, --repo-root <path>", "path to source git repo (defaults to cwd)")
     .option("-s, --service <name>", "compose service name for the app container (default: app)")
-    .option("-d, --data <path>", "host path to mount as <workspace>/storage (e.g. populated repository data)")
+    .option("-d, --data <path>", "host documents dir to mount as storage/repository (auto-detected when path is a storage/ parent with a repository/ subdir)")
     .option("-j, --java-ref <path>", "host path to the Java reference repo (auto-detected as sibling 'patentsafe/' if omitted)")
     .option("--no-features", "skip devcontainer features/lifecycle even if .devcontainer/devcontainer.json exists")
     .action(
