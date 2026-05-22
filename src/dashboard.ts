@@ -562,6 +562,12 @@ type Mode =
       planPath: string;
       lines: string[];
       scrollOffset: number;
+      // When the viewer was opened from inside a decision modal (Ctrl+V at the
+      // approval prompt), closing the viewer should restore the modal — not
+      // drop the user back to the empty dashboard, because they still need to
+      // answer the prompt that's blocking claude. Holds the decision state to
+      // restore on q/ESC.
+      returnTo?: { kind: "decision"; req: DecisionRequest; buffer: string };
     }
   | {
       kind: "view_diff_files";
@@ -842,7 +848,7 @@ function renderDecisionInput(
   lines.push(
     kleur.magenta("│") +
       padAnsi(
-        ` ${kleur.bold("ENTER")} send  ${kleur.bold("ESC")} dismiss (no answer)`,
+        ` ${kleur.bold("ENTER")} send  ${kleur.bold("^V")} view plan  ${kleur.bold("ESC")} dismiss`,
         w - 2,
       ) +
       kleur.magenta("│"),
@@ -1922,6 +1928,44 @@ export async function runDashboard(): Promise<void> {
       } else if (chunk === "\x7f" || chunk === "\b") {
         mode = { ...mode, buffer: mode.buffer.slice(0, -1) };
         redraw();
+      } else if (chunk === "\x16") {
+        // Ctrl+V: open the plan file for the worktree blocking on this
+        // decision, so the user can read it before answering. Saves the
+        // current decision modal as returnTo so closing the viewer brings
+        // them back to the same prompt with the same buffer.
+        const reqWorktree = mode.req.worktree;
+        const entry = rows.find((r) => r.entry.name === reqWorktree)?.entry;
+        if (!entry) {
+          flash(`No entry found for ${reqWorktree}`);
+          redraw();
+          return;
+        }
+        const savedDecision = { kind: "decision" as const, req: mode.req, buffer: mode.buffer };
+        void (async () => {
+          const planPath = await findPlanForWorktree(entry);
+          if (!planPath) {
+            flash(`No plan found for ${entry.name}`);
+            redraw();
+            return;
+          }
+          const fs = await import("node:fs/promises");
+          try {
+            const content = await fs.readFile(planPath, "utf8");
+            mode = {
+              kind: "view_plan",
+              entry,
+              planPath,
+              lines: content.split("\n"),
+              scrollOffset: 0,
+              returnTo: savedDecision,
+            };
+            redraw();
+          } catch (e) {
+            flash(`Failed to read plan: ${(e as Error).message}`);
+            redraw();
+          }
+        })();
+        return;
       } else if (chunk === "\x03") {
         clearInterval(tick);
         finishCleanly();
@@ -2022,7 +2066,9 @@ export async function runDashboard(): Promise<void> {
       const wrappedTotal = wrapPlanLines(mode.lines, cols).total;
       const maxOffset = Math.max(0, wrappedTotal - visibleRows);
       if (chunk === "q" || chunk === "\x1b" || chunk === "\x03") {
-        mode = { kind: "normal" };
+        // If the viewer was opened from a decision modal (Ctrl+V), pop back
+        // to that modal so the user can answer the prompt they were on.
+        mode = mode.returnTo ? mode.returnTo : { kind: "normal" };
         redraw();
       } else if (chunk === "j" || chunk === "\x1b[B") {
         mode = {
