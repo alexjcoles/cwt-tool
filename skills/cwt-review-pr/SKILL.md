@@ -200,6 +200,17 @@ AMPHTT-NNN
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
 ```
 
+**Immediately after the commit, verify the tree is clean of modifications** — a missed `git add` for one of the fix files would silently ship a half-applied review batch:
+
+```bash
+git status --porcelain | grep -vE '^\?\?' && {
+  echo "ERROR: modified files left behind after fix commit — you missed one"
+  exit 1
+}
+```
+
+If anything is flagged, stage the missed file and `git commit --amend --no-edit` to fold it into the same fix commit. The push step (Step 10) does a final clean-tree check too, but that's a last-line gate — catching it here keeps the fix commit complete.
+
 ## Step 8: Update plan amendments
 
 Find the plan file (same approach as `/cwt-execute` step 1).

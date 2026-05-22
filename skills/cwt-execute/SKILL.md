@@ -84,7 +84,18 @@ For each commit in `## Commit Structure`:
    Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
    ```
 
-5. If tests fail: `report_status('blocked', '<test name> failing: <one-line cause>')`, save your work in progress with `git stash` if needed, and stop. Do NOT push through red tests by relaxing assertions or skipping tests.
+5. **Immediately after each commit, verify the tree is clean of modifications** — `git add <files>` is easy to mis-paste, so a file you meant to include can silently get left behind:
+
+   ```bash
+   git status --porcelain | grep -vE '^\?\?' && {
+     echo "ERROR: modified files left behind after commit — you missed something"
+     exit 1
+   }
+   ```
+
+   (Untracked `??` files are allowed — they may be material for the next commit. Any `M`/`A`/`D`/`R` status is a problem.) If the check fails, the file you missed should be part of the just-made commit: stage it, then `git commit --amend --no-edit` to fold it into the same commit. Don't create a separate "add missing X" follow-up commit — the missed file belongs to the work you just described.
+
+6. If tests fail: `report_status('blocked', '<test name> failing: <one-line cause>')`, save your work in progress with `git stash` if needed, and stop. Do NOT push through red tests by relaxing assertions or skipping tests.
 
 ## Step 5: Plan deviations (amendments, not silent rewrites)
 

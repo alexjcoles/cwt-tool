@@ -126,6 +126,17 @@ For each FIX, in order:
    Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
    ```
 
+6. **Immediately after the commit, verify the tree is clean of modifications** — `git add <files>` is easy to mis-paste during multi-file fixes:
+
+   ```bash
+   git status --porcelain | grep -vE '^\?\?' && {
+     echo "ERROR: modified files left behind after pass <N> commit — you missed one"
+     exit 1
+   }
+   ```
+
+   If flagged, stage the missed file and `git commit --amend --no-edit` to fold it in. Don't push past this — Step 8's final-state check will catch it later, but the fix-pass commit message will be lying about its contents.
+
 If a FIX turns out to be more involved than the finding suggested (real refactor needed), stop and surface it. Don't sprawl the diff silently.
 
 ## Step 6: Apply DEFER items
