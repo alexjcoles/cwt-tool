@@ -60,11 +60,31 @@ Hold the tracer's "Summary: all behaviours" table — it populates the plan's Ja
 
 ## Step 5: Search for existing deferrals
 
+An **inbound deferral** is a `TODO:: [DEFERRED]` block somewhere in the tree whose `# See:` line points at *this* issue — code that was parked waiting for the work you're about to plan. Missing one means shipping the action without wiring (or re-pointing) the call site that was waiting for it, leaving the feature inert. This is a hard failure at review time, so the search must be reliable.
+
+**Do not window from the `[DEFERRED]` marker.** The previous approach (`rg "TODO:: \[DEFERRED\]" -A 6 | rg "AMPHTT-NNN"`) assumed the `# See:` line sits within a fixed number of lines of the marker. It doesn't: when a deferral's description wraps across several comment lines, `# See:` drifts past the window and the deferral goes invisible. That is exactly how a real inbound deferral (`signature_completion_service.rb`, `# See:` 7 rows below the marker) was missed — and then a Design Decision falsely claimed "a search returns none."
+
+Search by the **stable token — the issue ID itself** — then walk up to the block:
+
 ```bash
-rg "TODO:: \\[DEFERRED\\]" -A 6 | rg -B 1 "AMPHTT-NNN"   # the current issue ID
+# 1. Every mention of this issue ID anywhere in the worktree. An inbound
+#    deferral's `# See: AMPHTT-NNN` line WILL appear here regardless of how
+#    far it sits from its [DEFERRED] marker.
+rg -n "AMPHTT-NNN" -g '!docs/plans/**'
+
+# 2. Full inventory of every deferral marker in the tree, with line numbers,
+#    so you can correlate against the hits above and spot mis-pointed ones.
+rg -n "TODO:: \\[DEFERRED\\]"
 ```
 
-Search the Rails worktree. Each existing deferral that names this issue must be addressed in the plan — either implemented as a deliverable, or explicitly re-pointed.
+For **each** hit from search 1 that looks like a deferral reference (a `# See:` / `# Ref:` line, or any hit inside a comment block), open the file with the Read tool and read the **whole** surrounding block — never trust a fixed `-A`/`-B` context. Confirm it is a `[DEFERRED]` block and that its `# See:` genuinely names this issue.
+
+Every confirmed inbound deferral must be resolved in the plan in one of two ways, and the choice recorded as a Design Decision:
+
+- **Implement** — this issue builds the thing the deferral was waiting for, so the plan wires the parked call site (remove the TODO, add the call) as a deliverable. This is the default when the call site already exists.
+- **Re-point** — the call site still can't be wired from this issue; update the deferral's `# See:` to the correct future issue and its `# Reason:`, as a deliverable. Never leave a `# See:` pointing at this (about-to-close) issue.
+
+If you write a Design Decision claiming there are *no* inbound deferrals, it must be backed by search 1 above (the issue-ID search), and you must have actually inspected its output — not a marker-windowed search. A "returns none" claim that a reviewer can falsify in one grep is a review failure.
 
 ## Step 6: Verify branch state
 

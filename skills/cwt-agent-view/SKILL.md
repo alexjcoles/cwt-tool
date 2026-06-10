@@ -53,7 +53,7 @@ Construct a self-contained prompt for the subagent. It must include:
 4. **Conventions**: code matches existing Rails patterns in the project (naming, structure, error handling). Flag anything that diverges from neighboring code without justification.
 5. **Security**: SQL injection, mass assignment, missing authz checks, secrets in code, unescaped user input rendered to HTML.
 6. **Correctness**: obvious bugs (off-by-one, nil handling, race conditions), N+1 queries, infinite loops, blocking calls in request paths.
-7. **Deferrals**: every `TODO:: [DEFERRED]` comment introduced in the diff has the full five-line header (what / Reason / Scope / Java ref / See). The plan's deferral resolutions are actually applied.
+7. **Deferrals**: every `TODO:: [DEFERRED]` comment introduced in the diff has the full five-line header (what / Reason / Scope / Java ref / See). The plan's deferral resolutions are actually applied. **Independently check for inbound deferrals the plan may have missed**: run `rg -n "AMPHTT-NNN" -g '!docs/plans/**'` for this issue's ID across the whole worktree (not just the diff) — every `# See: AMPHTT-NNN` hit is a parked call site this PR was meant to wire or re-point. Do not window from the `[DEFERRED]` marker (the `# See:` line can sit many rows below it); search the bare ID, then read the enclosing block. Any inbound deferral that is neither wired nor re-pointed in the diff is a finding, even if the plan never mentioned it.
 8. **Commit structure**: commits match the plan's `## Commit Structure`. Each commit subject follows conventional-commit format and ends with the `AMPHTT-NNN` trailer.
 
 ### Required output format
