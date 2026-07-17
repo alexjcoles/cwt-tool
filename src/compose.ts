@@ -23,6 +23,30 @@ export async function up(opts: ComposeOptions): Promise<void> {
   );
 }
 
+// Start a subset of services without building anything. Used to pre-warm
+// postgres/selenium while cwt new is still doing host-side prep and the
+// devcontainer CLI resolves features — by the time the app container is
+// created, pg is already healthy and the depends_on gate costs ~0s.
+// Idempotent: the later full up leaves already-running services alone.
+export async function upServices(
+  opts: ComposeOptions & { services: string[] },
+): Promise<void> {
+  await runOrThrow(
+    [
+      "docker",
+      "compose",
+      "-p",
+      opts.projectName,
+      "-f",
+      opts.composeFile,
+      "up",
+      "-d",
+      ...opts.services,
+    ],
+    { cwd: opts.cwd },
+  );
+}
+
 export async function down(opts: ComposeOptions): Promise<void> {
   await runOrThrow(
     [

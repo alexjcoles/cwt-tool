@@ -6,6 +6,7 @@ import { State, type WorktreeEntry } from "./state.ts";
 import { templatePath, writeTemplate } from "./template.ts";
 import * as compose from "./compose.ts";
 import * as devcontainer from "./devcontainer.ts";
+import * as fixups from "./fixup.ts";
 import {
   LINEAR_ID_PATTERN,
   composeProject,
@@ -246,11 +247,13 @@ export async function create(opts: CreateOptions): Promise<WorktreeEntry> {
   // Pre-create the shared volumes that span all cwt worktrees. They're
   // declared `external: true` in the compose template so `cwt rm`'s
   // `compose down -v` never touches them — auth in cwt-claude-config /
-  // cwt-gh-config and gem caches in cwt-bundle-cache / cwt-cargo-registry
-  // need to survive a worktree being removed. `docker volume create` is
-  // idempotent: succeeds if the volume already exists.
+  // cwt-gh-config, the claude binary in cwt-claude-share, and package
+  // caches in cwt-bundle-cache / cwt-cargo-registry need to survive a
+  // worktree being removed. `docker volume create` is idempotent:
+  // succeeds if the volume already exists.
   for (const volName of [
     "cwt-claude-config",
+    "cwt-claude-share",
     "cwt-gh-config",
     "cwt-bundle-cache",
     "cwt-cargo-registry",
@@ -350,26 +353,58 @@ export async function create(opts: CreateOptions): Promise<WorktreeEntry> {
 
   log.info(`Wrote compose file to ${composeFile}`);
 
+  // Pre-warm postgres + selenium now, so pg's initdb + healthcheck run
+  // concurrently with the devcontainer CLI's startup/feature resolution
+  // (~5s) instead of serially after the app image is ready. Best-effort:
+  // if this fails, the full up below surfaces the real error.
+  try {
+    await compose.upServices({
+      projectName: project,
+      composeFile,
+      services: ["postgres", "selenium"],
+    });
+    log.info("Pre-started postgres + selenium (warm up during image prep)");
+  } catch (e) {
+    log.warn(`Pre-start of postgres/selenium failed (continuing): ${(e as Error).message}`);
+  }
+
   const useDevcontainer =
     !opts.noFeatures && devcontainer.projectHasDevcontainer(wtPath);
 
-  if (useDevcontainer) {
-    log.info(
-      "Detected project devcontainer.json — using devcontainer CLI (features + lifecycle hooks)",
-    );
-    await devcontainer.up({
-      worktreePath: wtPath,
-      cwtName: opts.name,
-      composeFileAbs: composeFile,
-      serviceName,
-      containerEnv: {
-        CWT_WORKTREE_NAME: opts.name,
-        CWT_PORT_BASE: String(portBase),
-      },
-    });
-  } else {
-    log.info("Starting containers via docker compose (no devcontainer features)");
-    await compose.up({ projectName: project, composeFile });
+  try {
+    if (useDevcontainer) {
+      log.info(
+        "Detected project devcontainer.json — using devcontainer CLI (features + lifecycle hooks)",
+      );
+      await devcontainer.up({
+        worktreePath: wtPath,
+        cwtName: opts.name,
+        composeFileAbs: composeFile,
+        serviceName,
+        containerEnv: {
+          CWT_WORKTREE_NAME: opts.name,
+          CWT_PORT_BASE: String(portBase),
+        },
+      });
+    } else {
+      log.info("Starting containers via docker compose (no devcontainer features)");
+      await compose.up({ projectName: project, composeFile });
+    }
+  } catch (e) {
+    // No state entry exists yet, so `cwt rm` can't find this worktree —
+    // without cleanup the pre-started postgres/selenium (and anything the
+    // failed up managed to start) would keep running invisibly, surviving
+    // reboots via restart: unless-stopped. Tear the compose project down
+    // best-effort and keep the worktree dir + up-log for diagnosis.
+    log.warn("Create failed after containers were started — bringing them down");
+    await compose
+      .down({ projectName: project, composeFile })
+      .catch((downErr) =>
+        log.warn(
+          `Cleanup compose down failed (run 'cwt prune' to collect strays): ${(downErr as Error).message}`,
+        ),
+      );
+    throw e;
   }
   log.success(`Containers up for ${opts.name}`);
 
@@ -624,13 +659,18 @@ async function ensureContainerFixups(opts: {
 }): Promise<void> {
   const fixup = [
     // Volume ownership (docker creates named volumes root-owned)
-    "sudo chown -R vscode:vscode /home/vscode/.claude /home/vscode/.config/gh 2>/dev/null || true",
-    // tmux — cwt attach needs it
-    "command -v tmux >/dev/null 2>&1 || (sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends tmux >/dev/null 2>&1) || true",
-    // claude binary — sometimes postCreate didn't finish
-    "test -x /home/vscode/.local/bin/claude || curl -fsSL https://claude.ai/install.sh | bash >/dev/null 2>&1 || true",
+    fixups.VOLUME_CHOWN_FIXUP,
+    // tmux — cwt attach needs it; this is the ONE place it gets installed
+    // (deliberately off cwt new's critical path)
+    fixups.TMUX_INSTALL_FIXUP,
+    // paste-friendly tmux config, in case the container was recreated
+    // outside devcontainer up and postStart never ran
+    fixups.TMUX_CONF_FIXUP,
+    // claude binary — relink from the shared volume, download only as a
+    // last resort
+    fixups.CLAUDE_INSTALL_FIXUP,
     // .claude.json symlink into the shared volume (auth carries across containers)
-    "if [ ! -L /home/vscode/.claude.json ]; then if [ -f /home/vscode/.claude/.claude.json ]; then rm -f /home/vscode/.claude.json; ln -sf /home/vscode/.claude/.claude.json /home/vscode/.claude.json; elif [ -f /home/vscode/.claude.json ]; then mv /home/vscode/.claude.json /home/vscode/.claude/.claude.json && ln -sf /home/vscode/.claude/.claude.json /home/vscode/.claude.json; fi; fi",
+    fixups.CLAUDE_JSON_SYMLINK_FIXUP,
   ].join("; ");
   await compose.exec({
     projectName: opts.projectName,

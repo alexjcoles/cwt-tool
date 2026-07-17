@@ -28,6 +28,13 @@ import { join } from "node:path";
 import kleur from "kleur";
 import { State, type WorktreeEntry } from "./state.ts";
 import { statusDirForWorktree } from "./util.ts";
+import {
+  CLAUDE_INSTALL_FIXUP,
+  CLAUDE_JSON_SYMLINK_FIXUP,
+  TMUX_CONF_FIXUP,
+  TMUX_INSTALL_FIXUP,
+  VOLUME_CHOWN_FIXUP,
+} from "./fixup.ts";
 
 interface ChannelStatus {
   state: string;
@@ -1395,14 +1402,16 @@ async function runCreateFlow(
       ? `/cwt-plan-minor ${rawInput.toUpperCase()}`
       : null;
     process.stdout.write(kleur.dim(`→ pre-loading claude in detached tmux...\n`));
-    autoLaunchClaude(entry, initialPrompt);
+    const launched = autoLaunchClaude(entry, initialPrompt);
     process.stdout.write(
       "\n" +
         kleur.green("✓ done. ") +
         kleur.dim("reopening dashboard — press ENTER on the new row to attach.\n") +
-        (initialPrompt
-          ? kleur.dim(`  claude is pre-loaded with: ${kleur.cyan(initialPrompt)}\n`)
-          : kleur.dim(`  claude is pre-loaded with the channel flag.\n`)),
+        (launched
+          ? initialPrompt
+            ? kleur.dim(`  claude is pre-loaded with: ${kleur.cyan(initialPrompt)}\n`)
+            : kleur.dim(`  claude is pre-loaded with the channel flag.\n`)
+          : kleur.yellow(`  claude was NOT pre-loaded (see warning above) — start it manually after attach.\n`)),
     );
     await runDashboard();
     process.exit(0);
@@ -1417,10 +1426,12 @@ async function runCreateFlow(
 // confirms on attach). Idempotent: if the session already exists, send-keys
 // targets the existing one. Errors are logged but non-fatal — the worktree
 // is still usable, they'll just have to type the command themselves.
+// Returns whether the command was actually pre-typed, so the caller can
+// avoid claiming "pre-loaded" when it wasn't.
 function autoLaunchClaude(
   entry: { composeProject: string; worktreePath: string; serviceName?: string },
   initialPrompt: string | null,
-): void {
+): boolean {
   const { spawnSync } = require("node:child_process");
   const composeFile = join(entry.worktreePath, ".cwt", "docker-compose.yml");
   const service = entry.serviceName ?? "app";
@@ -1443,6 +1454,28 @@ function autoLaunchClaude(
     claudeCmdParts.push(`'${safe}'`);
   }
   const claudeCmd = claudeCmdParts.join(" ");
+
+  // Step 0: make sure tmux exists. Create no longer installs tmux in its
+  // postStart (keeping apt off cwt new's critical path), so on a fresh
+  // container this is where it gets installed (~5s once); guarded no-op
+  // afterwards. Conf is written too so the new session picks it up.
+  spawnSync(
+    "docker",
+    [
+      "compose",
+      "-p",
+      entry.composeProject,
+      "-f",
+      composeFile,
+      "exec",
+      "-T",
+      service,
+      "bash",
+      "-c",
+      [TMUX_INSTALL_FIXUP, TMUX_CONF_FIXUP].join("; "),
+    ],
+    { stdio: "pipe" },
+  );
 
   // Step 1: ensure the detached tmux session exists. -A attaches to existing
   // session if present; -d means detached; -s names it.
@@ -1467,12 +1500,20 @@ function autoLaunchClaude(
     { stdio: "pipe" },
   );
   if (newSession.status !== 0) {
+    // docker compose writes some errors to stdout, others to stderr —
+    // surface both, plus the exit status, so failures aren't blank.
+    const detail = [
+      newSession.stderr?.toString().trim(),
+      newSession.stdout?.toString().trim(),
+    ]
+      .filter(Boolean)
+      .join(" | ");
     process.stdout.write(
       kleur.yellow(
-        `⚠ Could not create tmux session for auto-launch (${newSession.stderr?.toString().trim()}); you'll need to run claude manually after attach.\n`,
+        `⚠ Could not create tmux session for auto-launch (exit ${newSession.status}${detail ? `: ${detail}` : ""}); you'll need to run claude manually after attach.\n`,
       ),
     );
-    return;
+    return false;
   }
 
   // Step 2: type the claude command into the session. NOT followed by Enter.
@@ -1503,7 +1544,9 @@ function autoLaunchClaude(
         `⚠ Could not pre-type claude command (${sendKeys.stderr?.toString().trim()}); you'll need to run it manually.\n`,
       ),
     );
+    return false;
   }
+  return true;
 }
 
 export async function runDashboard(): Promise<void> {
@@ -2332,10 +2375,11 @@ export async function runDashboard(): Promise<void> {
           "bash",
           "-c",
           [
-            "sudo chown -R vscode:vscode /home/vscode/.claude /home/vscode/.config/gh 2>/dev/null || true",
-            "command -v tmux >/dev/null 2>&1 || (sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends tmux >/dev/null 2>&1) || true",
-            "test -x /home/vscode/.local/bin/claude || curl -fsSL https://claude.ai/install.sh | bash >/dev/null 2>&1 || true",
-            "if [ ! -L /home/vscode/.claude.json ]; then if [ -f /home/vscode/.claude/.claude.json ]; then rm -f /home/vscode/.claude.json; ln -sf /home/vscode/.claude/.claude.json /home/vscode/.claude.json; elif [ -f /home/vscode/.claude.json ]; then mv /home/vscode/.claude.json /home/vscode/.claude/.claude.json && ln -sf /home/vscode/.claude/.claude.json /home/vscode/.claude.json; fi; fi",
+            VOLUME_CHOWN_FIXUP,
+            TMUX_INSTALL_FIXUP,
+            TMUX_CONF_FIXUP,
+            CLAUDE_INSTALL_FIXUP,
+            CLAUDE_JSON_SYMLINK_FIXUP,
           ].join("; "),
         ],
         { stdio: "inherit" },

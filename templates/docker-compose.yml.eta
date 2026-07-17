@@ -24,13 +24,24 @@ services:
       # so the worktree's .git pointer (which holds a host absolute path) resolves
       # in both places. Lets `git status/commit/log` work from inside the container.
       - <%= it.repoRoot %>/.git:<%= it.repoRoot %>/.git:cached
+      # Gem cache: BUNDLE_PATH (set in environment below) points bundler at
+      # this volume, so gems installed by one worktree's bin/setup are reused
+      # by every later worktree (~70s saved per create).
       - cwt-bundle-cache:/usr/local/bundle
-      - cwt-cargo-registry:/root/.cargo/registry
+      # Crate cache: must match CARGO_HOME=/usr/local/cargo, which both the
+      # rust devcontainer feature and templates/Dockerfile set. (Previously
+      # mounted at /root/.cargo/registry, which nothing ever used.)
+      - cwt-cargo-registry:/usr/local/cargo/registry
       # Persist claude.ai login + sessions across cwt worktrees so /login is a
-      # one-time thing. Volume ownership is fixed up by a postStartCommand
+      # one-time thing. Volume ownership is fixed up by an onCreateCommand
       # injected in the merged devcontainer config (Docker creates new named
       # volumes root-owned, but the container runs as vscode).
       - cwt-claude-config:/home/vscode/.claude
+      # Claude Code binary (~250MB): the installer writes versions into
+      # ~/.local/share/claude, so persisting it means new worktrees just
+      # relink ~/.local/bin/claude instead of re-downloading. Deliberately
+      # NOT the whole ~/.local — that would mask the image's mise installs.
+      - cwt-claude-share:/home/vscode/.local/share/claude
       - cwt-gh-config:/home/vscode/.config/gh
       # cwt channel: MCP server bundle + activity hook, mounted read-only.
       - <%= it.channelDist %>:/cwt/channel:ro
@@ -53,6 +64,11 @@ services:
     environment:
       CWT_WORKTREE_NAME: <%= it.worktreeName %>
       CWT_PORT_BASE: "<%= it.portBase %>"
+      # Point bundler at the shared gem-cache volume. Without this the
+      # project's mise-managed Ruby installs gems into the container's
+      # writable layer and the cwt-bundle-cache volume stays empty forever.
+      BUNDLE_PATH: /usr/local/bundle
+      BUNDLE_JOBS: "4"
       # Project's database.yml drives the DB name; we only point it at
       # this worktree's postgres container.
       DB_HOST: postgres
@@ -83,16 +99,29 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: <%= it.dbName %>
+      # Skip initdb's fsync passes — this is a throwaway dev DB on a volume
+      # that is wiped on cwt rm, and the syncs cost ~1.3s of every create.
+      POSTGRES_INITDB_ARGS: "--no-sync"
     volumes:
       - postgres-data:/var/lib/postgresql/data
     networks:
       - app
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
-      interval: 5s
+      # start_interval probes every 1s during start_period so the app
+      # container (depends_on: service_healthy) starts ~2s after pg is
+      # ready instead of waiting for the first steady-state tick. The
+      # generous start_period costs nothing when pg is fast (probing stops
+      # at the first success) but keeps the 1s cadence covering slow starts
+      # (WAL recovery, loaded machine) — past start_period the cadence
+      # falls back to `interval`, which would stall the app gate. Failures
+      # during start_period don't count toward retries, so a dead pg fails
+      # the create at start_period + retries*interval ≈ 2 minutes.
+      interval: 10s
       timeout: 3s
-      retries: 10
-      start_period: 10s
+      retries: 5
+      start_period: 60s
+      start_interval: 1s
 
   selenium:
     image: selenium/standalone-chromium
@@ -110,8 +139,9 @@ volumes:
   postgres-data:
   # Shared across all cwt worktrees — never removed by `cwt rm` because
   # they're declared external. Pre-created by cwt new (`docker volume create`).
-  # Auth in cwt-claude-config + cwt-gh-config and gem caches in
-  # cwt-bundle-cache / cwt-cargo-registry persist across worktree lifecycles.
+  # Auth in cwt-claude-config + cwt-gh-config, the claude binary in
+  # cwt-claude-share, and package caches in cwt-bundle-cache /
+  # cwt-cargo-registry persist across worktree lifecycles.
   cwt-bundle-cache:
     external: true
     name: cwt-bundle-cache
@@ -121,6 +151,9 @@ volumes:
   cwt-claude-config:
     external: true
     name: cwt-claude-config
+  cwt-claude-share:
+    external: true
+    name: cwt-claude-share
   cwt-gh-config:
     external: true
     name: cwt-gh-config
